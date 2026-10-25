@@ -3,7 +3,7 @@
 This document describes the app and its installer in enough detail to rebuild them from scratch.
 User-facing usage is in [README.md](README.md). Every change to the app must be reflected here.
 
-Current version: **0.3.0**. The version lives in the root `Cargo.toml`. The installer reads it from there, so `installer/Cargo.toml`'s own version does not matter.
+Current version: **0.3.1**. The version lives in the root `Cargo.toml`. The installer reads it from there, so `installer/Cargo.toml`'s own version does not matter.
 
 ## 1. Goals
 
