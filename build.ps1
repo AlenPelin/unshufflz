@@ -21,4 +21,7 @@ $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Obj
 New-Item -ItemType Directory -Force dist | Out-Null
 $out = "dist\UnshufflzSetup-$ver.exe"
 Copy-Item target\release\unshufflz-setup.exe $out -Force
+$hash = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+Set-Content "$out.sha256" "$hash *$(Split-Path $out -Leaf)" -Encoding ascii -NoNewline
 Write-Host "Installer: $out"
+Write-Host "SHA-256:   $hash"

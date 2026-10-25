@@ -388,7 +388,7 @@ impl App {
             GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
             self.dpi = dx;
             self.frame = (x, wa.top, w, h);
-            let animate = self.cfg.anim_ms > 0;
+            let animate = self.cfg.slide_ms() > 0;
             // First frame: fully at the screen edge (nothing visible) when animating.
             self.slide = if !animate { 0 } else if self.cfg.side == Side::Left { -w } else { w };
             paint::render(self);
@@ -402,11 +402,11 @@ impl App {
         }
     }
 
-    /// Slide the content in from the screen edge (blocks the main thread for `anim_ms`;
+    /// Slide the content in from the screen edge (blocks the main thread for `slide_ms()`;
     /// keys keep queueing in the hook thread). One frame per screen refresh (DwmFlush).
     fn slide_in(&mut self, w: i32) {
         let sign = if self.cfg.side == Side::Left { -1 } else { 1 };
-        let ms = self.cfg.anim_ms as f64;
+        let ms = self.cfg.slide_ms() as f64;
         let start = std::time::Instant::now();
         let mut frames = 0;
         loop {

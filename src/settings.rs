@@ -1,5 +1,5 @@
 //! Settings window (tray → Settings…): overlay width, history size, show delay,
-//! show with Start menu, folder for saved pictures, left/right placement.
+//! show with Start menu, slide-in animation, folder for saved pictures, left/right placement.
 //! Plain Win32 controls; themed via the Common Controls v6 manifest.
 
 use crate::app;
@@ -13,7 +13,7 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{InitCommonControlsEx, ICC_BAR_CLASSES, INITCOMMONCONTROLSEX};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -25,6 +25,8 @@ const ID_DELAY: usize = 104;
 const ID_PICS: usize = 105;
 const ID_BROWSE: usize = 106;
 const ID_START: usize = 107;
+const ID_ANIM: usize = 108;
+const ID_ANIM_MS: usize = 109;
 
 const TBM_GETPOS: u32 = WM_USER;
 const TBM_SETPOS: u32 = WM_USER + 5;
@@ -56,6 +58,8 @@ struct Ui {
     delay: HWND,
     pics: HWND,
     start: HWND,
+    anim: HWND,
+    anim_ms: HWND,
     font: HFONT,
     /// Config the window was opened with; OK changes only the fields shown here.
     base: Config,
@@ -100,7 +104,7 @@ pub fn open(cfg: Config) {
         let s = |v: i32| v * dpi as i32 / 96;
 
         // Size and center on the monitor under the cursor.
-        let mut r = RECT { left: 0, top: 0, right: s(360), bottom: s(362) };
+        let mut r = RECT { left: 0, top: 0, right: s(360), bottom: s(394) };
         AdjustWindowRectExForDpi(&mut r, STYLE, 0, 0, dpi);
         let (ww, wh) = (r.right - r.left, r.bottom - r.top);
         let mut pt = std::mem::zeroed();
@@ -141,20 +145,27 @@ pub fn open(cfg: Config) {
         if cfg.show_with_start {
             SendMessageW(start, BM_SETCHECK, BST_CHECKED_, 0);
         }
-        child("STATIC", "Save pictures (Win+S) to folder", 0, 16, 186, 328, 20, 0);
-        let pics = child("EDIT", &cfg.pictures_dir, WS_TABSTOP | ES_AUTOHSCROLL_, 16, 208, 240, 24, ID_PICS);
+        let anim = child("BUTTON", "Slide-in animation, duration (ms, 1-1000)", WS_TABSTOP | BS_AUTOCHECKBOX_, 16, 184, 264, 22, ID_ANIM);
+        let anim_ms = child("EDIT", &cfg.anim_ms.max(1).to_string(), WS_TABSTOP | ES_NUMBER_ | ES_RIGHT_, 284, 183, 60, 24, ID_ANIM_MS);
+        SendMessageW(anim_ms, EM_SETLIMITTEXT_, 4, 0);
+        if cfg.anim_on {
+            SendMessageW(anim, BM_SETCHECK, BST_CHECKED_, 0);
+        }
+        EnableWindow(anim_ms, cfg.anim_on as i32);
+        child("STATIC", "Save pictures (Win+S) to folder", 0, 16, 218, 328, 20, 0);
+        let pics = child("EDIT", &cfg.pictures_dir, WS_TABSTOP | ES_AUTOHSCROLL_, 16, 240, 240, 24, ID_PICS);
         // Empty box = default folder, shown as a grey hint.
         let hint = wide(&imagesave::default_dir().to_string_lossy());
         SendMessageW(pics, EM_SETCUEBANNER_, 1, hint.as_ptr() as LPARAM);
-        child("BUTTON", "Browse…", WS_TABSTOP | BS_PUSHBUTTON_, 262, 207, 82, 26, ID_BROWSE);
-        child("STATIC", "Position", 0, 16, 242, 260, 20, 0);
-        let right = child("BUTTON", "Right side of the screen", WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON_, 24, 264, 300, 22, ID_RIGHT);
-        let left = child("BUTTON", "Left side of the screen", BS_AUTORADIOBUTTON_, 24, 288, 300, 22, ID_LEFT);
+        child("BUTTON", "Browse…", WS_TABSTOP | BS_PUSHBUTTON_, 262, 239, 82, 26, ID_BROWSE);
+        child("STATIC", "Position", 0, 16, 274, 260, 20, 0);
+        let right = child("BUTTON", "Right side of the screen", WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON_, 24, 296, 300, 22, ID_RIGHT);
+        let left = child("BUTTON", "Left side of the screen", BS_AUTORADIOBUTTON_, 24, 320, 300, 22, ID_LEFT);
         SendMessageW(if cfg.side == Side::Left { left } else { right }, BM_SETCHECK, BST_CHECKED_, 0);
-        child("BUTTON", "OK", WS_TABSTOP | WS_GROUP | BS_DEFPUSHBUTTON_, 168, 322, 84, 28, IDOK as usize);
-        child("BUTTON", "Cancel", WS_TABSTOP | BS_PUSHBUTTON_, 260, 322, 84, 28, IDCANCEL as usize);
+        child("BUTTON", "OK", WS_TABSTOP | WS_GROUP | BS_DEFPUSHBUTTON_, 168, 354, 84, 28, IDOK as usize);
+        child("BUTTON", "Cancel", WS_TABSTOP | BS_PUSHBUTTON_, 260, 354, 84, 28, IDCANCEL as usize);
 
-        let ui: &'static Ui = Box::leak(Box::new(Ui { hwnd, track, value, right, count, delay, pics, start, font, base: cfg }));
+        let ui: &'static Ui = Box::leak(Box::new(Ui { hwnd, track, value, right, count, delay, pics, start, anim, anim_ms, font, base: cfg }));
         UI.with(|u| u.set(Some(ui)));
         update_value();
         ShowWindow(hwnd, SW_SHOW);
@@ -211,6 +222,9 @@ fn apply() -> bool {
         cfg.hold_ms = number(ui.delay).unwrap_or(0).min(2000);
         cfg.pictures_dir = pictures_dir;
         cfg.show_with_start = SendMessageW(ui.start, BM_GETCHECK, 0, 0) as usize == BST_CHECKED_;
+        cfg.anim_on = SendMessageW(ui.anim, BM_GETCHECK, 0, 0) as usize == BST_CHECKED_;
+        // Keep the old duration if the box is empty or 0.
+        cfg.anim_ms = number(ui.anim_ms).filter(|&n| n > 0).map_or(ui.base.anim_ms, |n| n.min(1000));
         app::apply_settings(cfg);
     }
     true
@@ -274,6 +288,13 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                     DestroyWindow(h);
                 }
                 ID_BROWSE => browse(),
+                ID_ANIM => {
+                    // Duration box only editable while the animation is on.
+                    if let Some(ui) = UI.with(|u| u.get()) {
+                        let on = SendMessageW(ui.anim, BM_GETCHECK, 0, 0) as usize == BST_CHECKED_;
+                        EnableWindow(ui.anim_ms, on as i32);
+                    }
+                }
                 _ => {}
             }
             0
