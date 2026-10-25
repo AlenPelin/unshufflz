@@ -1,29 +1,73 @@
-/// Settings from `unshufflz.ini` next to the exe (all optional):
-///   HoldDelayMs=250   WidthPercent=15   MaxItemMB=200
+/// Settings in `%LOCALAPPDATA%\Unshufflz\unshufflz.ini` (all keys optional):
+///   HoldDelayMs=250   WidthPercent=15   Position=right   MaxItems=10   MaxItemMB=200
+/// The settings window rewrites this file.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub hold_ms: u32,
     pub width_pct: u32,
+    pub side: Side,
+    pub max_items: usize,
     pub max_item_bytes: u64,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Config { hold_ms: 250, width_pct: 15, side: Side::Right, max_items: 10, max_item_bytes: 200 << 20 }
+    }
+}
+
+pub const MAX_ITEMS_LIMIT: usize = 100;
+
+pub fn path() -> std::path::PathBuf {
+    crate::util::data_dir().join("unshufflz.ini")
+}
+
 pub fn load() -> Config {
-    let path = crate::util::exe_path().with_file_name("unshufflz.ini");
-    parse(&std::fs::read_to_string(path).unwrap_or_default())
+    parse(&std::fs::read_to_string(path()).unwrap_or_default())
 }
 
 pub fn parse(text: &str) -> Config {
-    let mut c = Config { hold_ms: 250, width_pct: 15, max_item_bytes: 200 << 20 };
+    let mut c = Config::default();
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else { continue };
-        let Ok(v) = v.trim().parse::<u64>() else { continue };
-        match k.trim().to_ascii_lowercase().as_str() {
-            "holddelayms" => c.hold_ms = v.clamp(50, 2000) as u32,
-            "widthpercent" => c.width_pct = v.clamp(5, 50) as u32,
-            "maxitemmb" => c.max_item_bytes = v.clamp(1, 2048) << 20,
+        let v = v.trim();
+        let n = v.parse::<u64>().ok();
+        match (k.trim().to_ascii_lowercase().as_str(), n) {
+            ("holddelayms", Some(n)) => c.hold_ms = n.clamp(50, 2000) as u32,
+            ("widthpercent", Some(n)) => c.width_pct = n.clamp(5, 50) as u32,
+            ("maxitems", Some(n)) => c.max_items = n.clamp(1, MAX_ITEMS_LIMIT as u64) as usize,
+            ("maxitemmb", Some(n)) => c.max_item_bytes = n.clamp(1, 2048) << 20,
+            ("position", _) if v.eq_ignore_ascii_case("left") => c.side = Side::Left,
+            ("position", _) if v.eq_ignore_ascii_case("right") => c.side = Side::Right,
             _ => {}
         }
     }
     c
+}
+
+pub fn format(c: &Config) -> String {
+    format!(
+        "[General]\r\nHoldDelayMs={}\r\nWidthPercent={}\r\nPosition={}\r\nMaxItems={}\r\nMaxItemMB={}\r\n",
+        c.hold_ms,
+        c.width_pct,
+        if c.side == Side::Left { "left" } else { "right" },
+        c.max_items,
+        c.max_item_bytes >> 20
+    )
+}
+
+pub fn save(c: &Config) -> std::io::Result<()> {
+    let p = path();
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::util::write_file_safe(&p, format(c).as_bytes())
 }
 
 #[cfg(test)]
@@ -32,15 +76,21 @@ mod tests {
 
     #[test]
     fn defaults_and_overrides() {
-        let c = parse("");
-        assert_eq!((c.hold_ms, c.width_pct, c.max_item_bytes), (250, 15, 200 << 20));
-        let c = parse("[General]\nHoldDelayMs = 400\nwidthpercent=20\nMaxItemMB=5\njunk\nOther=1");
-        assert_eq!((c.hold_ms, c.width_pct, c.max_item_bytes), (400, 20, 5 << 20));
+        assert_eq!(parse(""), Config::default());
+        let c = parse("[General]\nHoldDelayMs = 400\nwidthpercent=20\nPosition = Left\nMaxItems=25\nMaxItemMB=5\njunk\nOther=1");
+        assert_eq!((c.hold_ms, c.width_pct, c.side, c.max_items, c.max_item_bytes), (400, 20, Side::Left, 25, 5 << 20));
     }
 
     #[test]
     fn values_are_clamped() {
-        let c = parse("HoldDelayMs=1\nWidthPercent=99\nMaxItemMB=0");
-        assert_eq!((c.hold_ms, c.width_pct, c.max_item_bytes), (50, 50, 1 << 20));
+        let c = parse("HoldDelayMs=1\nWidthPercent=99\nMaxItemMB=0\nPosition=middle\nMaxItems=1000");
+        assert_eq!((c.hold_ms, c.width_pct, c.side, c.max_items, c.max_item_bytes), (50, 50, Side::Right, 100, 1 << 20));
+        assert_eq!(parse("MaxItems=0").max_items, 1);
+    }
+
+    #[test]
+    fn format_roundtrip() {
+        let c = Config { hold_ms: 300, width_pct: 22, side: Side::Left, max_items: 42, max_item_bytes: 7 << 20 };
+        assert_eq!(parse(&format(&c)), c);
     }
 }

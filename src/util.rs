@@ -1,7 +1,35 @@
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+
+/// Rename `from` over `to` with write-through, so the switch is on disk when this returns.
+pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    let f = wide(&from.to_string_lossy());
+    let t = wide(&to.to_string_lossy());
+    if unsafe { MoveFileExW(f.as_ptr(), t.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Write `<path>.tmp`, flush it to disk, then replace `path` with it.
+pub fn write_file_safe(path: &Path, data: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let r = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        drop(f);
+        replace_file(&tmp, path)
+    })();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
 
 /// UTF-16 string with trailing NUL, for Win32 calls.
 pub fn wide(s: &str) -> Vec<u16> {

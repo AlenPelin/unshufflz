@@ -9,7 +9,7 @@
 //! Item files are written before the index that references them.
 
 use crate::clip::{Fmt, Payload};
-use crate::util::wide;
+use crate::util::replace_file;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
@@ -58,8 +57,15 @@ impl Store {
                     batch.push(j);
                 }
                 let last_index = batch.iter().rposition(|j| matches!(j, Job::Index(_)));
+                // Items queued before the newest index but not listed in it were already
+                // pushed out of history: don't write them at all.
+                let keep: Option<HashSet<u64>> = last_index.map(|i| match &batch[i] {
+                    Job::Index(e) => e.iter().map(|x| x.id).collect(),
+                    _ => HashSet::new(),
+                });
                 for (i, job) in batch.into_iter().enumerate() {
                     match job {
+                        Job::Item(id, _) if last_index.is_some_and(|l| i < l) && keep.as_ref().is_some_and(|k| !k.contains(&id)) => {}
                         Job::Item(id, p) => {
                             if write_item(&dir, id, &p).is_ok() {
                                 unsafe { PostMessageW(hwnd as _, saved_msg, 0, id as isize) };
@@ -132,21 +138,12 @@ fn write_atomic(path: &Path, body: impl FnOnce(&mut HashWriter<BufWriter<&File>>
         }
         file.sync_all()?;
         drop(file);
-        replace(&tmp, path)
+        replace_file(&tmp, path)
     })();
     if r.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     r
-}
-
-fn replace(from: &Path, to: &Path) -> io::Result<()> {
-    let f = wide(&from.to_string_lossy());
-    let t = wide(&to.to_string_lossy());
-    if unsafe { MoveFileExW(f.as_ptr(), t.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 pub fn write_item(dir: &Path, id: u64, p: &Payload) -> io::Result<()> {
@@ -381,6 +378,28 @@ mod tests {
         let loaded = load(&d, 10);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].0.id, 7);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn thousand_items_keep_only_last_ten_on_disk() {
+        let d = tmp_dir("thousand");
+        let mut s = Store::start(d.clone(), 0, 0);
+        let mut order: Vec<u64> = Vec::new();
+        for id in 1..=1000u64 {
+            let p = vec![Fmt { id: 13, name: String::new(), data: id.to_le_bytes().to_vec() }];
+            s.save_item(id, Arc::new(p));
+            order.insert(0, id);
+            order.truncate(10);
+            s.save_index(order.iter().map(|&id| Entry { id, time: id, source: String::new() }).collect());
+        }
+        s.shutdown();
+        let mut files: Vec<String> = fs::read_dir(&d).unwrap().flatten().map(|f| f.file_name().to_string_lossy().into_owned()).collect();
+        files.sort();
+        assert_eq!(files.len(), 11, "{:?}", files); // 10 items + index.dat
+        assert!(files.contains(&"index.dat".to_string()));
+        let loaded = load(&d, 100);
+        assert_eq!(loaded.iter().map(|(e, _)| e.id).collect::<Vec<_>>(), (991..=1000).rev().collect::<Vec<_>>());
         let _ = fs::remove_dir_all(&d);
     }
 

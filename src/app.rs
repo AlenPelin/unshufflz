@@ -1,9 +1,10 @@
 use crate::clip::{self, Payload};
-use crate::config::Config;
-use crate::history::{self, Item, MAX, RAM_LIMIT};
+use crate::config::{self, Config, Side};
+use crate::history::{self, Item, RAM_LIMIT};
 use crate::hook::{self, A_CANCEL, A_COMMIT, A_NEXT, A_PREV, A_SHOW, WM_APP_HOOK};
 use crate::paint::{self, Fonts};
-use crate::preview;
+use crate::preview::{self, Kind};
+use crate::settings;
 use crate::store::{self, Entry, Store};
 use crate::tray;
 use crate::util::{data_dir, now_unix, wide};
@@ -21,6 +22,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN,
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 pub const WM_APP_SAVED: u32 = WM_APP + 2;
+/// Sent by a second instance: open the settings window.
+pub const WM_APP_SETTINGS: u32 = WM_APP + 4;
 const TIMER_CAPTURE: usize = 1;
 const TIMER_WATCH: usize = 2;
 
@@ -30,6 +33,8 @@ pub struct App {
     pub hwnd: HWND,
     pub items: Vec<Item>,
     pub sel: usize,
+    /// First history row shown in the list (it shows at most `paint::LIST_ROWS` rows).
+    pub scroll: usize,
     pub fonts: Fonts,
     cfg: Config,
     fmts: clip::Formats,
@@ -45,6 +50,16 @@ thread_local! {
 }
 
 /// Run `f` on the app state; None if it is busy (re-entrant message).
+/// Max thumbnail width: the overlay width on the primary monitor minus padding.
+fn thumb_width(width_pct: u32) -> i32 {
+    unsafe { GetSystemMetrics(SM_CXSCREEN) * width_pct as i32 / 100 - 32 }
+}
+
+/// Called by the settings window on OK.
+pub fn apply_settings(width_pct: u32, side: Side, max_items: usize) {
+    with_app(|a| a.apply_settings(width_pct, side, max_items));
+}
+
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|a| a.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
 }
@@ -79,11 +94,12 @@ pub fn run(cfg: Config) {
         TASKBAR_CREATED.store(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()), Ordering::Relaxed);
 
         let dir = data_dir().join("store");
-        let thumb_w = GetSystemMetrics(SM_CXSCREEN) * cfg.width_pct as i32 / 100 - 32;
+        let thumb_w = thumb_width(cfg.width_pct);
         let mut app = App {
             hwnd,
             items: Vec::new(),
             sel: 0,
+            scroll: 0,
             fonts: Fonts::new(96),
             fmts: clip::Formats::register(),
             visible: false,
@@ -104,6 +120,10 @@ pub fn run(cfg: Config) {
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            let sh = settings::hwnd();
+            if !sh.is_null() && IsDialogMessageW(sh, &msg) != 0 {
+                continue; // Tab / Enter / Esc in the settings window
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -115,7 +135,7 @@ pub fn run(cfg: Config) {
 
 impl App {
     fn load(&mut self) {
-        for (e, p) in store::load(&self.dir, MAX) {
+        for (e, p) in store::load(&self.dir, self.cfg.max_items) {
             let size = history::payload_size(&p);
             let item = Item {
                 id: e.id,
@@ -151,7 +171,7 @@ impl App {
         let p = Arc::new(p);
         self.store.save_item(id, p.clone());
         self.items.insert(0, Item { id, key, time: now_unix(), source, size, payload: Some(p), preview });
-        self.items.truncate(MAX);
+        self.items.truncate(self.cfg.max_items);
         self.sel = 0;
         self.save_index();
         self.invalidate();
@@ -178,11 +198,13 @@ impl App {
                 if self.sel + 1 < self.items.len() {
                     self.sel += 1;
                 }
+                self.scroll = history::keep_visible(self.sel, self.scroll, paint::LIST_ROWS);
                 self.invalidate();
             }
             A_NEXT => {
                 self.show();
                 self.sel = self.sel.saturating_sub(1);
+                self.scroll = history::keep_visible(self.sel, self.scroll, paint::LIST_ROWS);
                 self.invalidate();
             }
             A_COMMIT => {
@@ -230,6 +252,7 @@ impl App {
             return;
         }
         self.sel = 0;
+        self.scroll = 0;
         unsafe {
             let mut pt = std::mem::zeroed();
             GetCursorPos(&mut pt);
@@ -239,7 +262,8 @@ impl App {
             GetMonitorInfoW(mon, &mut mi);
             let w = ((mi.rcMonitor.right - mi.rcMonitor.left) * self.cfg.width_pct as i32 / 100).max(200);
             let wa = mi.rcWork;
-            SetWindowPos(self.hwnd, HWND_TOPMOST, wa.right - w, wa.top, w, wa.bottom - wa.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            let x = if self.cfg.side == Side::Left { wa.left } else { wa.right - w };
+            SetWindowPos(self.hwnd, HWND_TOPMOST, x, wa.top, w, wa.bottom - wa.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
             SetTimer(self.hwnd, TIMER_WATCH, 150, None);
         }
         self.visible = true;
@@ -272,8 +296,38 @@ impl App {
         }
     }
 
+    pub fn side(&self) -> Side {
+        self.cfg.side
+    }
+
+    fn apply_settings(&mut self, width_pct: u32, side: Side, max_items: usize) {
+        let width_changed = width_pct != self.cfg.width_pct;
+        self.cfg.width_pct = width_pct;
+        self.cfg.side = side;
+        self.cfg.max_items = max_items;
+        if self.items.len() > max_items {
+            self.items.truncate(max_items);
+            self.save_index(); // the writer then deletes the dropped item files
+        }
+        let _ = config::save(&self.cfg);
+        if width_changed {
+            // Rebuild image thumbnails for the new width.
+            self.thumb_w = thumb_width(width_pct);
+            for it in &mut self.items {
+                if it.preview.kind != Kind::Image {
+                    continue;
+                }
+                let p = it.payload.clone().or_else(|| store::read_item(&self.dir, it.id).map(Arc::new));
+                if let Some(p) = p {
+                    it.preview = preview::build(&p, self.thumb_w);
+                }
+            }
+        }
+    }
+
     fn on_menu(&mut self, cmd: u32) {
         match cmd {
+            tray::ID_SETTINGS => settings::open(self.cfg.width_pct, self.cfg.side, self.cfg.max_items),
             tray::ID_CLEAR => {
                 self.items.clear();
                 self.sel = 0;
@@ -292,6 +346,10 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
     match m {
         WM_APP_HOOK => {
             with_app(|a| a.on_hook(wp));
+            0
+        }
+        WM_APP_SETTINGS => {
+            with_app(|a| a.on_menu(tray::ID_SETTINGS));
             0
         }
         WM_APP_SAVED => {

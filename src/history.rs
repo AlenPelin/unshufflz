@@ -3,7 +3,6 @@ use crate::preview::Preview;
 use std::sync::Arc;
 use xxhash_rust::xxh3::Xxh3;
 
-pub const MAX: usize = 10;
 /// Items bigger than this keep their payload only on disk once saved.
 pub const RAM_LIMIT: u64 = 1 << 20;
 
@@ -51,6 +50,18 @@ pub fn content_key(p: &Payload) -> u64 {
     }
 }
 
+/// First visible row so that `sel` is inside a window of `rows` rows,
+/// moving the window as little as possible from `scroll`.
+pub fn keep_visible(sel: usize, scroll: usize, rows: usize) -> usize {
+    if sel < scroll {
+        sel
+    } else if sel >= scroll + rows {
+        sel + 1 - rows
+    } else {
+        scroll
+    }
+}
+
 pub fn payload_size(p: &Payload) -> u64 {
     p.iter().map(|f| f.data.len() as u64).sum()
 }
@@ -78,6 +89,16 @@ mod tests {
         let b = vec![f(0xC222, "X", b"1")];
         assert_eq!(full_hash(&a), full_hash(&b));
         assert_eq!(payload_size(&a), 1);
+    }
+
+    #[test]
+    fn list_scrolls_minimally() {
+        assert_eq!(keep_visible(0, 0, 10), 0);
+        assert_eq!(keep_visible(9, 0, 10), 0);
+        assert_eq!(keep_visible(10, 0, 10), 1); // one past the bottom
+        assert_eq!(keep_visible(14, 5, 10), 5); // still visible, no move
+        assert_eq!(keep_visible(4, 5, 10), 4); // one above the top
+        assert_eq!(keep_visible(0, 7, 10), 0);
     }
 
     #[test]

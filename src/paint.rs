@@ -1,4 +1,6 @@
 use crate::app::App;
+use crate::config::Side;
+use crate::history::keep_visible;
 use crate::preview::{Kind, Preview};
 use crate::util::{format_time, w, wide};
 use std::ptr::null_mut;
@@ -14,6 +16,9 @@ const FG2: u32 = 0x00A8_A8A8;
 const ACCENT: u32 = 0x00D7_7800;
 const SEL: u32 = 0x0070_4010;
 const LINE: u32 = 0x0040_4040;
+
+/// History rows visible at once; longer histories scroll (no scrollbar).
+pub const LIST_ROWS: usize = 10;
 
 /// Fonts for one DPI, recreated when the DPI changes.
 pub struct Fonts {
@@ -78,10 +83,13 @@ pub fn paint(app: &mut App, hdc: HDC) {
         let old = SelectObject(dc, bmp);
         SetBkMode(dc, TRANSPARENT as _);
         fill(dc, rc, BG);
-        fill(dc, rect(0, 0, s(3), ht), ACCENT);
+        // Accent bar on the screen-inner edge.
+        let left = app.side() == Side::Left;
+        let bar = if left { rect(wd - s(3), 0, wd, ht) } else { rect(0, 0, s(3), ht) };
+        fill(dc, bar, ACCENT);
 
         let pad = s(14);
-        let (x0, x1) = (s(3) + pad, wd - pad);
+        let (x0, x1) = if left { (pad, wd - s(3) - pad) } else { (s(3) + pad, wd - pad) };
         let f = &app.fonts;
         let n = app.items.len();
         let mut y = pad;
@@ -103,11 +111,13 @@ pub fn paint(app: &mut App, hdc: HDC) {
             y += s(12);
 
             let row = s(24);
-            let list_top = ht - pad - row * n as i32;
+            let rows = n.min(LIST_ROWS);
+            let first = keep_visible(sel, app.scroll, LIST_ROWS).min(n - rows);
+            let list_top = ht - pad - row * rows as i32;
             preview(dc, f, &it.preview, rect(x0, y, x1, list_top - s(16)), &s);
             fill(dc, rect(x0, list_top - s(8), x1, list_top - s(8) + 1), LINE);
-            for (i, item) in app.items.iter().enumerate() {
-                let top = list_top + row * i as i32;
+            for (i, item) in app.items.iter().enumerate().skip(first).take(rows) {
+                let top = list_top + row * (i - first) as i32;
                 if i == sel {
                     fill(dc, rect(x0 - s(6), top, x1 + s(6), top + row), SEL);
                 }

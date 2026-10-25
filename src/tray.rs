@@ -10,6 +10,7 @@ pub const WM_APP_TRAY: u32 = WM_APP + 3;
 pub const ID_CLEAR: u32 = 1;
 pub const ID_AUTOSTART: u32 = 2;
 pub const ID_EXIT: u32 = 3;
+pub const ID_SETTINGS: u32 = 4;
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const RUN_VALUE: &str = "Unshufflz";
@@ -85,6 +86,7 @@ fn make_icon() -> HICON {
 pub fn menu(hwnd: HWND) -> u32 {
     unsafe {
         let m = CreatePopupMenu();
+        AppendMenuW(m, MF_STRING, ID_SETTINGS as usize, wide("Settings…").as_ptr());
         AppendMenuW(m, MF_STRING, ID_CLEAR as usize, wide("Clear history").as_ptr());
         let flags = MF_STRING | if autostart_enabled() { MF_CHECKED } else { 0 };
         AppendMenuW(m, flags, ID_AUTOSTART as usize, wide("Start with Windows").as_ptr());
