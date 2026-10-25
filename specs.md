@@ -415,6 +415,8 @@ Accent bar: 3 px wide, on the edge facing the screen center:
 - side Right → left edge of the overlay; content `x0 = s(3)+pad`, `x1 = width−pad`.
 - side Left → right edge; content `x0 = pad`, `x1 = width−s(3)−pad`.
 
+All text goes through one helper (`text`: select font, set color, `DrawTextW` with `DT_NOPREFIX`). It **skips empty strings**: an empty Rust slice has a dangling pointer (`0x2`), and `DrawTextW` reads it even with length 0, which crashed the app (access violation in USER32) whenever an item with an empty summary or text was drawn.
+
 Layout (`pad = s(14)`):
 1. Title row (height s(24)): "Clipboard" on the left and `"{sel+1} / {n}"` on the right.
    - If the history is empty, it shows "History is empty" at `y+s(40)` instead of everything below.

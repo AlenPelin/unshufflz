@@ -59,6 +59,11 @@ unsafe fn fill(dc: HDC, r: RECT, c: u32) {
 }
 
 unsafe fn text(dc: HDC, font: HFONT, s: &[u16], mut r: RECT, flags: u32, color: u32) {
+    // An empty slice's pointer is a dangling non-null address (0x2), and DrawTextW
+    // reads it even with length 0 (crash). Nothing to draw anyway.
+    if s.is_empty() {
+        return;
+    }
     SelectObject(dc, font);
     SetTextColor(dc, color);
     DrawTextW(dc, s.as_ptr(), s.len() as i32, &mut r, flags | DT_NOPREFIX);
