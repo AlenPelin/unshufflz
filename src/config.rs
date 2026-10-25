@@ -1,6 +1,6 @@
 /// Settings in `%LOCALAPPDATA%\Unshufflz\unshufflz.ini` (all keys optional):
 ///   HoldDelayMs=0   WidthPercent=15   Position=right   MaxItems=10   MaxItemMB=200   PicturesDir=
-///   ShowWithStart=0
+///   ShowWithStart=0   AnimationMs=50
 /// The settings window rewrites this file.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Side {
@@ -19,11 +19,13 @@ pub struct Config {
     pub pictures_dir: String,
     /// Also show the overlay while the Start menu is open.
     pub show_with_start: bool,
+    /// Slide-in duration of the overlay; 0 = no animation.
+    pub anim_ms: u32,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { hold_ms: 0, width_pct: 15, side: Side::Right, max_items: 10, max_item_bytes: 200 << 20, pictures_dir: String::new(), show_with_start: false }
+        Config { hold_ms: 0, width_pct: 15, side: Side::Right, max_items: 10, max_item_bytes: 200 << 20, pictures_dir: String::new(), show_with_start: false, anim_ms: 50 }
     }
 }
 
@@ -50,6 +52,7 @@ pub fn parse(text: &str) -> Config {
             ("maxitemmb", Some(n)) => c.max_item_bytes = n.clamp(1, 2048) << 20,
             ("picturesdir", _) => c.pictures_dir = v.to_string(),
             ("showwithstart", Some(n)) => c.show_with_start = n != 0,
+            ("animationms", Some(n)) => c.anim_ms = n.min(1000) as u32,
             ("position", _) if v.eq_ignore_ascii_case("left") => c.side = Side::Left,
             ("position", _) if v.eq_ignore_ascii_case("right") => c.side = Side::Right,
             _ => {}
@@ -60,14 +63,15 @@ pub fn parse(text: &str) -> Config {
 
 pub fn format(c: &Config) -> String {
     format!(
-        "[General]\r\nHoldDelayMs={}\r\nWidthPercent={}\r\nPosition={}\r\nMaxItems={}\r\nMaxItemMB={}\r\nPicturesDir={}\r\nShowWithStart={}\r\n",
+        "[General]\r\nHoldDelayMs={}\r\nWidthPercent={}\r\nPosition={}\r\nMaxItems={}\r\nMaxItemMB={}\r\nPicturesDir={}\r\nShowWithStart={}\r\nAnimationMs={}\r\n",
         c.hold_ms,
         c.width_pct,
         if c.side == Side::Left { "left" } else { "right" },
         c.max_items,
         c.max_item_bytes >> 20,
         c.pictures_dir,
-        c.show_with_start as u8
+        c.show_with_start as u8,
+        c.anim_ms
     )
 }
 
@@ -100,12 +104,15 @@ mod tests {
 
     #[test]
     fn format_roundtrip() {
-        let c = Config { hold_ms: 300, width_pct: 22, side: Side::Left, max_items: 42, max_item_bytes: 7 << 20, pictures_dir: r"D:\My Shots=1\x".into(), show_with_start: true };
+        let c = Config { hold_ms: 300, width_pct: 22, side: Side::Left, max_items: 42, max_item_bytes: 7 << 20, pictures_dir: r"D:\My Shots=1\x".into(), show_with_start: true, anim_ms: 120 };
         assert_eq!(parse(&format(&c)), c);
         assert_eq!(parse("PicturesDir=").pictures_dir, "");
         assert!(parse("ShowWithStart=1").show_with_start);
         assert!(!parse("ShowWithStart=0").show_with_start);
         assert!(!parse("").show_with_start);
+        assert_eq!(parse("").anim_ms, 50);
+        assert_eq!(parse("AnimationMs=0").anim_ms, 0);
+        assert_eq!(parse("AnimationMs=99999").anim_ms, 1000);
         assert_eq!(parse("picturesdir =  C:\\a b  ").pictures_dir, "C:\\a b");
     }
 }

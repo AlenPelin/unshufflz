@@ -6,8 +6,7 @@ use crate::util::{format_time, w, wide};
 use std::ptr::null_mut;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
-use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
-use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
+use windows_sys::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
 
 // COLORREF is 0x00BBGGRR
 const BG: u32 = 0x0020_2020;
@@ -19,6 +18,8 @@ const LINE: u32 = 0x0040_4040;
 
 /// History rows visible at once; longer histories scroll (no scrollbar).
 pub const LIST_ROWS: usize = 10;
+/// Overlay opacity (0-255).
+pub const OPACITY: u32 = 245;
 
 /// Fonts for one DPI, recreated when the DPI changes.
 pub struct Fonts {
@@ -65,22 +66,72 @@ unsafe fn text(dc: HDC, font: HFONT, s: &[u16], mut r: RECT, flags: u32, color: 
 
 const LINE1: u32 = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS;
 
-pub fn paint(app: &mut App, hdc: HDC) {
+/// Draw the overlay and hand the finished frame to Windows in one `UpdateLayeredWindow`
+/// call (pixels, per-pixel alpha and position together), so a frame is never half updated.
+/// The window rect is `app.frame`; `app.slide` shifts the content for the slide-in.
+pub fn render(app: &mut App) {
+    let (x, y, wd, ht) = app.frame;
+    if wd <= 0 || ht <= 0 {
+        return;
+    }
     unsafe {
-        let mut rc: RECT = std::mem::zeroed();
-        GetClientRect(app.hwnd, &mut rc);
-        let (wd, ht) = (rc.right, rc.bottom);
-        if wd <= 0 || ht <= 0 {
-            return;
+        let screen = GetDC(null_mut());
+        let dc = CreateCompatibleDC(screen);
+        let mut bmi: BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = wd;
+        bmi.bmiHeader.biHeight = -ht; // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        let mut bits = null_mut();
+        let dib = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+        if !dib.is_null() {
+            let old = SelectObject(dc, dib);
+            draw(app, dc, wd, ht);
+            GdiFlush();
+            let px = std::slice::from_raw_parts_mut(bits as *mut u32, (wd * ht) as usize);
+            compose(px, wd as usize, ht as usize, app.slide, OPACITY);
+            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+            let (pos, size, src) = (POINT { x, y }, SIZE { cx: wd, cy: ht }, POINT { x: 0, y: 0 });
+            UpdateLayeredWindow(app.hwnd, screen, &pos, &size, dc, &src, 0, &blend, ULW_ALPHA);
+            SelectObject(dc, old);
+            DeleteObject(dib);
         }
-        let dpi = GetDpiForWindow(app.hwnd).max(96);
+        DeleteDC(dc);
+        ReleaseDC(null_mut(), screen);
+    }
+}
+
+/// Turn a GDI-drawn frame into premultiplied BGRA for UpdateLayeredWindow:
+/// shift every row by `slide` pixels (positive = right, negative = left), make the
+/// uncovered part fully transparent, and give the content uniform `alpha`.
+pub fn compose(px: &mut [u32], w: usize, h: usize, slide: i32, alpha: u32) {
+    let shift = (slide.unsigned_abs() as usize).min(w);
+    let premul = |c: u32| {
+        let ch = |v: u32| (v & 0xFF) * alpha / 255;
+        (alpha << 24) | (ch(c >> 16) << 16) | (ch(c >> 8) << 8) | ch(c)
+    };
+    for row in px.chunks_exact_mut(w).take(h) {
+        if slide >= 0 {
+            row.copy_within(0..w - shift, shift);
+            row[..shift].fill(0);
+            row[shift..].iter_mut().for_each(|p| *p = premul(*p));
+        } else {
+            row.copy_within(shift.., 0);
+            row[w - shift..].fill(0);
+            row[..w - shift].iter_mut().for_each(|p| *p = premul(*p));
+        }
+    }
+}
+
+unsafe fn draw(app: &mut App, dc: HDC, wd: i32, ht: i32) {
+    {
+        let dpi = app.dpi.max(96);
         if app.fonts.dpi != dpi {
             app.fonts = Fonts::new(dpi);
         }
         let s = |v: i32| v * dpi as i32 / 96;
-        let dc = CreateCompatibleDC(hdc);
-        let bmp = CreateCompatibleBitmap(hdc, wd, ht);
-        let old = SelectObject(dc, bmp);
+        let rc = rect(0, 0, wd, ht);
         SetBkMode(dc, TRANSPARENT as _);
         fill(dc, rc, BG);
         // Accent bar on the screen-inner edge.
@@ -125,10 +176,6 @@ pub fn paint(app: &mut App, hdc: HDC) {
                 text(dc, f.body, &item.preview.line, rect(x0 + s(22), top, x1, top + row), LINE1 | DT_LEFT, if i == sel { FG } else { FG2 });
             }
         }
-        BitBlt(hdc, 0, 0, wd, ht, dc, 0, 0, SRCCOPY);
-        SelectObject(dc, old);
-        DeleteObject(bmp);
-        DeleteDC(dc);
     }
 }
 
@@ -172,5 +219,37 @@ unsafe fn preview(dc: HDC, f: &Fonts, p: &Preview, r: RECT, s: &dyn Fn(i32) -> i
             }
         }
         _ => text(dc, f.body, &p.text, r, DT_LEFT | DT_WORDBREAK | DT_EXPANDTABS | DT_EDITCONTROL, FG),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compose;
+
+    const C: u32 = 0x00FF_8000; // GDI pixel, alpha byte 0
+
+    #[test]
+    fn settled_frame_gets_uniform_premultiplied_alpha() {
+        let mut px = vec![C; 4];
+        compose(&mut px, 2, 2, 0, 255);
+        assert!(px.iter().all(|&p| p == 0xFFFF_8000));
+        let mut px = vec![C; 1];
+        compose(&mut px, 1, 1, 0, 128);
+        assert_eq!(px[0], 0x8080_4000); // channels scaled by 128/255
+    }
+
+    #[test]
+    fn slide_right_and_left() {
+        // one row, 4 pixels: 1 2 3 4
+        let mut px = vec![1, 2, 3, 4];
+        compose(&mut px, 4, 1, 1, 255);
+        assert_eq!(px, vec![0, 0xFF00_0001, 0xFF00_0002, 0xFF00_0003]);
+        let mut px = vec![1, 2, 3, 4];
+        compose(&mut px, 4, 1, -1, 255);
+        assert_eq!(px, vec![0xFF00_0002, 0xFF00_0003, 0xFF00_0004, 0]);
+        // fully outside: all transparent
+        let mut px = vec![1, 2, 3, 4];
+        compose(&mut px, 4, 1, 9, 255);
+        assert_eq!(px, vec![0; 4]);
     }
 }

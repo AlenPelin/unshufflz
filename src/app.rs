@@ -15,11 +15,13 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Graphics::Dwm::DwmFlush;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::DataExchange::*;
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_RWIN};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -45,6 +47,12 @@ pub struct App {
     pub sel: usize,
     /// First history row shown in the list (it shows at most `paint::LIST_ROWS` rows).
     pub scroll: usize,
+    /// Horizontal content offset during the slide-in (0 when settled).
+    pub slide: i32,
+    /// Window rect (x, y, width, height) of the overlay on the current monitor.
+    pub frame: (i32, i32, i32, i32),
+    /// DPI of that monitor.
+    pub dpi: u32,
     pub fonts: Fonts,
     cfg: Config,
     fmts: clip::Formats,
@@ -104,7 +112,7 @@ pub fn run(cfg: Config) {
         if hwnd.is_null() {
             return;
         }
-        SetLayeredWindowAttributes(hwnd, 0, 245, LWA_ALPHA);
+        // Layered window drawn with UpdateLayeredWindow (per-pixel alpha), see paint::render.
         TASKBAR_CREATED.store(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()), Ordering::Relaxed);
 
         let dir = data_dir().join("store");
@@ -114,6 +122,9 @@ pub fn run(cfg: Config) {
             items: Vec::new(),
             sel: 0,
             scroll: 0,
+            slide: 0,
+            frame: (0, 0, 0, 0),
+            dpi: 96,
             fonts: Fonts::new(96),
             fmts: clip::Formats::register(),
             visible: false,
@@ -372,12 +383,46 @@ impl App {
             let w = ((mi.rcMonitor.right - mi.rcMonitor.left) * self.cfg.width_pct as i32 / 100).max(200);
             let wa = mi.rcWork;
             let x = if self.cfg.side == Side::Left { wa.left } else { wa.right - w };
-            SetWindowPos(self.hwnd, HWND_TOPMOST, x, wa.top, w, wa.bottom - wa.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            let h = wa.bottom - wa.top;
+            let (mut dx, mut dy) = (96, 96);
+            GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+            self.dpi = dx;
+            self.frame = (x, wa.top, w, h);
+            let animate = self.cfg.anim_ms > 0;
+            // First frame: fully at the screen edge (nothing visible) when animating.
+            self.slide = if !animate { 0 } else if self.cfg.side == Side::Left { -w } else { w };
+            paint::render(self);
+            SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             SetTimer(self.hwnd, TIMER_WATCH, 150, None);
+            self.visible = true;
+            crate::util::debug(|| "main overlay shown".to_string());
+            if animate {
+                self.slide_in(w);
+            }
         }
-        self.visible = true;
-        crate::util::debug(|| "main overlay shown".to_string());
-        self.invalidate();
+    }
+
+    /// Slide the content in from the screen edge (blocks the main thread for `anim_ms`;
+    /// keys keep queueing in the hook thread). One frame per screen refresh (DwmFlush).
+    fn slide_in(&mut self, w: i32) {
+        let sign = if self.cfg.side == Side::Left { -1 } else { 1 };
+        let ms = self.cfg.anim_ms as f64;
+        let start = std::time::Instant::now();
+        let mut frames = 0;
+        loop {
+            let dx = crate::anim::slide_offset(w, start.elapsed().as_secs_f64() * 1000.0, ms);
+            self.slide = sign * dx;
+            paint::render(self);
+            if dx == 0 {
+                crate::util::debug(|| format!("main slide-in done: {} frames in {:.1} ms", frames, start.elapsed().as_secs_f64() * 1000.0));
+                break;
+            }
+            frames += 1;
+            // One frame per screen refresh.
+            if unsafe { DwmFlush() } < 0 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
     }
 
     fn hide(&mut self) {
@@ -435,9 +480,10 @@ impl App {
         }
     }
 
-    fn invalidate(&self) {
+    /// Redraw now (the overlay is a layered window; there is no WM_PAINT drawing).
+    fn invalidate(&mut self) {
         if self.visible {
-            unsafe { InvalidateRect(self.hwnd, null(), 0) };
+            paint::render(self);
         }
     }
 
@@ -550,9 +596,9 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             0
         }
         WM_PAINT => {
+            // Drawing happens in paint::render (UpdateLayeredWindow); just validate.
             let mut ps: PAINTSTRUCT = std::mem::zeroed();
-            let hdc = BeginPaint(h, &mut ps);
-            with_app(|a| paint::paint(a, hdc));
+            BeginPaint(h, &mut ps);
             EndPaint(h, &ps);
             0
         }

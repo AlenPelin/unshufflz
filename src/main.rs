@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod anim;
 mod app;
 mod clip;
 mod config;

@@ -31,7 +31,7 @@ Current version: **0.2.0**. The version lives in the root `Cargo.toml`. The inst
 | Release profile (workspace root) | `opt-level=3`, `lto=true`, `codegen-units=1`, `panic="abort"`, `strip=true` |
 | Subsystem | `#![windows_subsystem = "windows"]` (no console), for both exes |
 
-App `windows-sys` features: `Win32_Foundation`, `Win32_Security`, `Win32_Graphics_Gdi`, `Win32_Storage_FileSystem`, `Win32_System_Com`, `Win32_System_DataExchange`, `Win32_System_Diagnostics_Debug`, `Win32_System_LibraryLoader`, `Win32_System_Memory`, `Win32_System_Registry`, `Win32_System_SystemInformation`, `Win32_System_Threading`, `Win32_System_Time`, `Win32_UI_Accessibility`, `Win32_UI_Controls`, `Win32_UI_HiDpi`, `Win32_UI_Input_KeyboardAndMouse`, `Win32_UI_Shell`, `Win32_UI_WindowsAndMessaging`.
+App `windows-sys` features: `Win32_Foundation`, `Win32_Security`, `Win32_Graphics_Dwm`, `Win32_Graphics_Gdi`, `Win32_Storage_FileSystem`, `Win32_System_Com`, `Win32_System_DataExchange`, `Win32_System_Diagnostics_Debug`, `Win32_System_LibraryLoader`, `Win32_System_Memory`, `Win32_System_Registry`, `Win32_System_SystemInformation`, `Win32_System_Threading`, `Win32_System_Time`, `Win32_UI_Accessibility`, `Win32_UI_Controls`, `Win32_UI_HiDpi`, `Win32_UI_Input_KeyboardAndMouse`, `Win32_UI_Shell`, `Win32_UI_WindowsAndMessaging`.
 
 Installer features:
 - `windows-sys`: `Win32_Foundation`, `Win32_System_Registry`, `Win32_System_Threading`, `Win32_UI_WindowsAndMessaging`.
@@ -60,7 +60,8 @@ Installer features:
 | `src/history.rs` | `Item`, `full_hash`, `content_key`, `keep_visible`, `payload_size`, `RAM_LIMIT` |
 | `src/imagesave.rs` | Win+S: DIB parsing / conversion to RGBA, PNG encoding, file naming, Pictures folder, "copied file" payload |
 | `src/preview.rs` | `Preview` / `Kind` / `Thumb`; preview building; DROPFILES parsing; DIB thumbnails |
-| `src/paint.rs` | `Fonts`, `LIST_ROWS`; drawing the overlay |
+| `src/paint.rs` | `Fonts`, `LIST_ROWS`, `OPACITY`; `render` (draw + `UpdateLayeredWindow`), `compose` (slide shift + alpha) |
+| `src/anim.rs` | Slide-in curve: `cubic_bezier`, `SLIDE`, `slide_offset` |
 | `src/settings.rs` | Settings window |
 | `src/store.rs` | Disk format, safe writes, writer thread, loading, cleanup |
 | `src/tray.rs` | Tray icon, menu, autostart registry |
@@ -81,7 +82,7 @@ Startup (`main` → `app::run`):
 2. `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`.
 3. Load the config (section 13).
 4. Register class `UnshufflzOverlay` and create the overlay window (section 10). It stays hidden.
-5. `SetLayeredWindowAttributes(alpha=245, LWA_ALPHA)`.
+5. No `SetLayeredWindowAttributes`: the layered window is drawn only with `UpdateLayeredWindow` (section 11).
 6. `RegisterWindowMessageW("TaskbarCreated")`. When Explorer restarts, the tray icon is added again.
 7. Thumbnail width = `GetSystemMetrics(SM_CXSCREEN) * WidthPercent / 100 - 32`.
 8. Start the store writer thread (section 9).
@@ -348,18 +349,38 @@ If `max_items` was lowered while the app was not running, the extra items are no
 
 ## 10. Overlay window
 
-- Class `UnshufflzOverlay`, window title `Unshufflz`, style `WS_POPUP`. Extended style `TOPMOST | TOOLWINDOW | NOACTIVATE | LAYERED | TRANSPARENT`, alpha 245.
+- Class `UnshufflzOverlay`, window title `Unshufflz`, style `WS_POPUP`. Extended style `TOPMOST | TOOLWINDOW | NOACTIVATE | LAYERED | TRANSPARENT`. Opacity 245/255, applied per pixel in `render`.
 - `WM_MOUSEACTIVATE` → `MA_NOACTIVATE`. `WM_ERASEBKGND` → 1. `WM_DPICHANGED` → 0. `WM_CLOSE` → default (destroys the window, which exits the app).
 - **Show**:
   1. Take the monitor under the cursor.
   2. Width = `max(200, monitor width × WidthPercent / 100)`. Height = work area height.
-  3. `y = work.top`. `x = work.left` for **Left**, or `work.right − width` for **Right**.
-  4. `SetWindowPos(HWND_TOPMOST, …, SWP_NOACTIVATE | SWP_SHOWWINDOW)`, then start timer 2.
+  3. `y = work.top`. `x = work.left` for **Left**, or `work.right − width` for **Right**. Store this as `app.frame`; `app.dpi` = `GetDpiForMonitor(MDT_EFFECTIVE_DPI)`.
+  4. `slide` = ±width (fully at the screen edge, nothing visible) if `AnimationMs > 0`, else 0. Then `render()` (the first `UpdateLayeredWindow` also sets position and size).
+  5. `SetWindowPos(HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)`, then start timer 2.
+  6. **Slide-in** (if `AnimationMs > 0`): a loop on the main thread until the offset is 0:
+     - `slide = ±slide_offset(width, elapsed_ms, AnimationMs)`, then `render()`, then `DwmFlush()` (wait for the next screen refresh; `Sleep(5)` if it fails);
+     - sign: + (content shifted right) for side Right, − for Left;
+     - the loop blocks the main thread for the duration (50 ms by default). Keys keep queueing (the hook runs on its own thread) and are handled afterwards in order;
+     - measured at 60 Hz: 3 frames, done 47–61 ms after Win down. With 1000 ms: 53 frames, done after 916 ms (the eased offset rounds to 0 before the end).
+  7. Hiding is instant (no animation).
 - **Hide**: `SW_HIDE`, stop timer 2.
 
 ## 11. Drawing (`paint.rs`)
 
-Double buffered (memory bitmap + `BitBlt`). Scale: `s(v) = v·dpi/96`, where dpi = `GetDpiForWindow` (minimum 96).
+`render(app)`:
+1. Create a 32-bit top-down DIB section of the window size (`app.frame`) and draw the overlay into it with GDI (`draw`).
+2. `GdiFlush`, then `compose(pixels, w, h, slide, OPACITY)`:
+   - every row is shifted by `slide` px (positive = right, negative = left);
+   - the uncovered pixels become 0 (fully transparent);
+   - the rest become premultiplied BGRA with alpha `OPACITY` = 245 (each channel × 245 / 255). GDI's alpha byte is ignored.
+3. `UpdateLayeredWindow(hwnd, screen DC, pos = frame x/y, size = frame w/h, src DC, (0,0), 0, BLENDFUNCTION{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA}, ULW_ALPHA)`.
+
+Pixels, alpha and position change in one call, so the screen never shows a half-updated frame. An earlier version clipped with `SetWindowRgn` plus a separate redraw; one frame could show the new edge with old content, and the accent bar went missing at the moving edge.
+There is no WM_PAINT drawing: `WM_PAINT` only validates. Every change calls `invalidate()`, which renders at once while the overlay is visible.
+
+Text is drawn on the opaque background first, then the whole panel gets alpha, so ClearType stays crisp.
+
+Scale: `s(v) = v·dpi/96`, where dpi = `app.dpi` (the monitor's effective DPI, minimum 96).
 
 Fonts (Segoe UI, ClearType, height `-(pt·dpi/72)`): title 12 pt weight 600; body 10 pt; small 9 pt.
 
@@ -421,6 +442,12 @@ Order of checks:
 
 `human_size` (1024-based): `N B`, `x.x KB`, `x.x MB`, `x.xx GB`.
 
+## 11a. Slide-in curve (`anim.rs`)
+
+- `SLIDE` = CSS `cubic-bezier(0.32, 0.72, 0, 1)`: Apple-style ease-out, as used by iOS for sliding panels. Fast start, long soft landing.
+- `cubic_bezier(curve, t)`: 0 for t ≤ 0, 1 for t ≥ 1. Otherwise it solves x(s) = t by 40 bisection steps (x is monotonic since x1, x2 ∈ [0,1]) and returns y(s), where x(s) = 3(1−s)²s·x1 + 3(1−s)s²·x2 + s³ and likewise for y.
+- `slide_offset(width, elapsed, duration)` = `round((1 − cubic_bezier(SLIDE, elapsed/duration)) × width)`; 0 if duration ≤ 0.
+
 ## 12a. Saving images (`imagesave.rs`, Win+S)
 
 **Folder**:
@@ -461,6 +488,7 @@ File: `%LOCALAPPDATA%\Unshufflz\unshufflz.ini`. It is read once at start and wri
 | `MaxItems` | 10 | 1–100 (`MAX_ITEMS_LIMIT`) |
 | `MaxItemMB` | 200 | 1–2048 |
 | `ShowWithStart` | 0 | 0 / 1 (any non-zero number = on) |
+| `AnimationMs` | 50 | 0–1000 (0 = no slide-in); INI only |
 | `PicturesDir` | empty (= `Pictures\Clipboard`) | folder path, taken as-is (trimmed); `=` inside the path is fine because only the first `=` splits the line |
 
 Parsing:
@@ -469,7 +497,7 @@ Parsing:
 - Unknown keys, sections and bad values are ignored.
 
 Saving (`config::save`):
-- Writes all seven keys under `[General]` with CRLF line ends: HoldDelayMs, WidthPercent, Position, MaxItems, MaxItemMB, PicturesDir, ShowWithStart.
+- Writes all eight keys under `[General]` with CRLF line ends: HoldDelayMs, WidthPercent, Position, MaxItems, MaxItemMB, PicturesDir, ShowWithStart, AnimationMs.
 - Uses `util::write_file_safe`: `.tmp`, `sync_all`, `replace_file`.
 
 ## 14. Settings window (`settings.rs`)
@@ -637,11 +665,12 @@ Errors show "Setup failed: …" (unless silent) and set exit code 1. User data i
   - hook events (vk, down/up, event time, flags, phase before → after, output), but only when the phase before or after is not Idle, so normal typing is never written;
   - main-thread actions;
   - the moment the overlay is shown;
+  - slide-in frame count and duration;
   - Start menu open/close.
 
 ## 18. Tests
 
-`cargo test --release` (app, 45 tests):
+`cargo test --release` (app, 49 tests):
 
 | Module | Tests |
 |---|---|
@@ -649,7 +678,9 @@ Errors show "Setup failed: …" (unless silent) and set exit code 1. User data i
 | store | item round trip; bit flip / truncation / empty rejected; index round trip + cleanup; broken index → scan; writer thread + double shutdown; **1000 items with a limit of 10 → exactly 10 item files + index on disk, newest 10 loaded in order** |
 | preview | DROPFILES parsing; text / RTF / files / image previews; thumbnail scaling; small image not enlarged; bad DIBs rejected |
 | history | duplicate key with extra formats; registered formats hashed by name; different text; `keep_visible` scrolling |
-| config | defaults and overrides incl. Position and MaxItems; clamping; format → parse round trip incl. PicturesDir and ShowWithStart |
+| config | defaults and overrides incl. Position and MaxItems; clamping; format → parse round trip incl. PicturesDir, ShowWithStart and AnimationMs; AnimationMs default 50, 0 allowed, capped at 1000 |
+| anim | curve: ends at 0 and 1, monotonic, ease-out (> 0.5 at t = 0.25), linear curve stays linear; offsets: full width at start, 0 at and after the end, 0 when the duration is 0, mid-values in range |
+| paint | `compose`: settled frame gets uniform premultiplied alpha (255 and 128); shift right / left with a transparent gap; fully shifted out = all transparent |
 | settings | folder box: empty OK, quotes removed, UNC OK, relative and drive-relative (`D:pics`) rejected |
 | imagesave | `target_dir` (empty → default `…\Clipboard`, else the setting); 24-bit bottom-up conversion; 32-bit alpha rules (all-zero → opaque, real alpha kept); 8-bit palette through GDI; broken / compressed DIBs rejected; PNG round trip (RGBA, and RGB when opaque); file names incl. `_2`; saving twice in one second makes two files; a `PNG` format is written as-is; file payload parses back to the path |
 | util | sizes; UTF-16 helpers; time format |
@@ -671,6 +702,11 @@ Manual checks done:
   - a quoted path was saved without quotes as `PicturesDir`;
   - Win+S then saved `Unshufflz_….png` into that folder, and the clipboard held that file;
   - the setting was set back to empty afterwards.
+- Slide-in, after the change to `UpdateLayeredWindow`:
+  - slow motion (`AnimationMs=1000`): screenshots at 150 / 300 / 600 / 1200 ms show the accent bar at the moving edge (x = 553 → 360 → 284 → 269), eased; 53 frames;
+  - real (`50`): 3 frames, done after 59–61 ms;
+  - the settled overlay looks as before.
+- Start menu timing for comparison (Windows 11): focus 9–31 ms after Win release; its slide-up ends 235–255 ms after release (screen sampled about every 18 ms).
 - ShowWithStart mode (simulated keys, debug log on):
   1. tap → Start open and overlay shown;
   2. Win+V+V → overlay shown;

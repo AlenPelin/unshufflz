@@ -6,7 +6,7 @@ A small clipboard history manager for Windows 10/11, similar to Clipboarder from
 It keeps your recent clipboard items (text, rich text, images, files and any other format).
 While you hold the Win key, it shows them in an overlay on the side of the screen.
 
-- A single 490 KB exe. It needs no runtime, browser engine or JavaScript.
+- A single 500 KB exe. It needs no runtime, browser engine or JavaScript.
 - It uses about 2 MB of private RAM, and 6 threads.
 - History is saved to disk and survives restarts and power loss.
 - You can change the history size (1–100 items), the overlay width and its side in a settings window.
@@ -49,7 +49,7 @@ The app runs in the background and adds a tray icon.
 
 | Keys | Result |
 |---|---|
-| Hold **Win** | Overlay appears at once (about 7 ms) with the current clipboard item. A delay can be set in Settings. |
+| Hold **Win** | Overlay appears at once with the current clipboard item, sliding in from the screen edge in 50 ms (Apple-style ease-out). A delay can be set in Settings. |
 | Hold Win + **V** | Go 1 step back in history (older item) |
 | Hold Win + **C** | Go 1 step forward in history (newer item) |
 | Hold Win + **B** | Delete the highlighted item from history (and disk). If it was the current clipboard item, the next older item goes on the clipboard right away (or the clipboard is emptied if nothing is left). Press B again to delete more. |
@@ -107,6 +107,7 @@ MaxItems=10       ; 1..100
 MaxItemMB=200     ; 1..2048   clipboard content bigger than this is not stored
 PicturesDir=      ; folder for Win+S pictures; empty = Pictures\Clipboard
 ShowWithStart=0   ; 1 = also show the overlay while the Start menu is open
+AnimationMs=50    ; 0..1000   slide-in duration; 0 = appear without animation
 ```
 
 ## Where data is stored
@@ -168,6 +169,10 @@ With **Also show while the Start menu is open** turned on, the overlay appears w
 | Esc, or click elsewhere | Start closes and the overlay hides |
 
 On newer Windows 11 versions, the Windows Search panel is the same program as Start, so the overlay shows with Search too.
+
+### Start menu speed
+
+The Windows Start menu itself is slower than the overlay. It gets focus 10–30 ms after Win is released, and its slide-up animation ends about 240 ms after release (measured on Windows 11). Windows has no setting for Start's speed alone. **Settings → Accessibility → Visual effects → Animation effects → Off** makes Start appear at once, but it turns off animations in all of Windows. The overlay's own animation is separate (`AnimationMs`).
 
 ## Troubleshooting
 
