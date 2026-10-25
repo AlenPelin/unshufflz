@@ -131,31 +131,35 @@ App state lives in a thread-local `RefCell<Option<App>>`. Handlers use `try_borr
 | Modifiers (passed through, tracked) | Shift 0x10/0xA0/0xA1 = bit 1, Ctrl 0x11/0xA2/0xA3 = bit 2, Alt 0x12/0xA4/0xA5 = bit 4 |
 | Mask key | 0xE8 |
 | Injection marker (`dwExtraInfo`) | 0x434C4950 |
-| Hold delay | `HoldDelayMs` (default 250 ms) |
+| Hold delay | `HoldDelayMs` (default 0 = show at once) |
+| Tap time `TAP_MS` | 300 ms |
 
 ### 6.2 Hook thread
 
 - `SetWindowsHookExW(WH_KEYBOARD_LL, proc, GetModuleHandleW(NULL), 0)`, then a `GetMessageW` loop.
 - The hold timer is a thread timer (`SetTimer(NULL, 0, HoldDelayMs, NULL)`), handled as `WM_TIMER` with hwnd NULL. Only one is active at a time.
+- If `HoldDelayMs` is 0, no timer is used: when `step()` asks to start the timer, the callback runs `on_hold()` at once and posts SHOW. The overlay is visible about 7 ms after Win down (measured).
+- `HoldDelayMs` lives in a global atomic; `hook::set_hold_ms` changes it (settings window).
 - The callback ignores events carrying the marker. For other events it runs `step()` and applies the result in this order: stop timer, start timer, post actions, inject, then return 1 (swallow) or `CallNextHookEx`.
 
 ### 6.3 State machine (pure, unit-tested)
 
-State: `phase` ∈ {Idle, Armed, Shown, Cancelled, Passthrough}; `win` = the Win VK that started the sequence; `mods` = bits of the modifiers held now; `image` = whether the current clipboard item is an image.
+State: `phase` ∈ {Idle, Armed, Shown, Cancelled, Passthrough}; `win` = the Win VK that started the sequence; `mods` = bits of the modifiers held now; `image` = whether the current clipboard item is an image; `now` = this event's time (`KBDLLHOOKSTRUCT.time`, ms); `down_time` = when Win went down; `acted` = C/V/B/S was pressed during this hold.
 - `image` is copied from a global `AtomicBool` before each event. The main thread sets it with `hook::set_image_on_clipboard` after every history change (in `save_index`) and after loading.
 - Before any rule, `mods` is updated: a modifier down sets its bit, up clears it (in every phase).
 Output: `swallow`, `inject`, `posts[]`, `start_timer`, `stop_timer`.
 
 Rules for `step(vk, down)`, checked in this order:
-1. **Idle**: Win down → Armed, `win=vk`, start_timer. Everything passes.
+1. **Idle**: Win down → Armed, `win=vk`, `down_time=now`, `acted=false`, start_timer. Everything passes.
 2. **vk == win**:
    - down (auto-repeat) → nothing.
    - up → stop_timer, phase = Idle, and:
-     - from Shown → post COMMIT, swallow, inject;
+     - from Shown, a **tap** (`!acted` and `now − down_time < TAP_MS`, using wrapping subtraction) → post CANCEL and pass the Win up, so **the Start menu opens. This is intended**: with a short or zero delay the overlay is already visible on a quick tap, and the tap must still open Start;
+     - from Shown otherwise → post COMMIT, swallow, inject (Start stays closed);
      - from Cancelled → swallow, inject;
      - otherwise → pass.
 3. The other Win key, a modifier, or phase Passthrough → pass, no change.
-4. **C/V/B**, and **S** when `image && mods == 0` (in Armed / Shown / Cancelled) → swallow both down and up. On down: if not Shown, then stop_timer, phase = Shown, post SHOW. Then post PREV (V), NEXT (C), DELETE (B) or SAVE (S). Otherwise S falls to rule 6 (normal Windows shortcut).
+4. **C/V/B**, and **S** when `image && mods == 0` (in Armed / Shown / Cancelled) → swallow both down and up. On down: `acted = true`; if not Shown, then stop_timer, phase = Shown, post SHOW. Then post PREV (V), NEXT (C), DELETE (B) or SAVE (S). Otherwise S falls to rule 6 (normal Windows shortcut).
 5. **Esc** in Shown or Cancelled → swallow. On down in Shown → Cancelled, post CANCEL.
 6. **Any other key**: on down, post CANCEL if Shown, stop_timer, phase = Passthrough. The key passes.
 
@@ -254,8 +258,8 @@ Operations:
   4. `add(file_payload(path), "unshufflz.exe")`.
   5. Restore the new item 0 to the clipboard and save `ignore_seq`.
 - **Clear**: empty the list, save an empty index.
-- **Apply settings** (`apply_settings(width, side, max_items)`):
-  1. Update the config.
+- **Apply settings** (`apply_settings(width, side, max_items, hold_ms)`):
+  1. Update the config, and pass `hold_ms` to the hook (`hook::set_hold_ms`).
   2. If the list is longer than `max_items`, cut it and save the index (the writer deletes the dropped files).
   3. Save the INI.
   4. If the width changed: recompute the thumbnail width and rebuild the previews of image items, from the payload in RAM or read from disk.
@@ -430,7 +434,7 @@ File: `%LOCALAPPDATA%\Unshufflz\unshufflz.ini`. It is read once at start and wri
 
 | Key | Default | Range / values |
 |---|---|---|
-| `HoldDelayMs` | 250 | 50–2000 |
+| `HoldDelayMs` | 0 | 0–2000 |
 | `WidthPercent` | 15 | 5–50 |
 | `Position` | right | `right` / `left` (any case) |
 | `MaxItems` | 10 | 1–100 (`MAX_ITEMS_LIMIT`) |
@@ -451,7 +455,7 @@ Opened from tray **Settings…** or by a second launch (`WM_APP_SETTINGS`). Only
 
 - `InitCommonControlsEx(ICC_BAR_CLASSES)`.
 - Class `UnshufflzSettings`: arrow cursor, `COLOR_BTNFACE` background. Title "Unshufflz Settings". Style `WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU` (fixed size).
-- Client area 360 × 242 (scaled by the window's DPI, sized with `AdjustWindowRectExForDpi`), centered on the work area of the monitor under the cursor.
+- Client area 360 × 276 (scaled by the window's DPI, sized with `AdjustWindowRectExForDpi`), centered on the work area of the monitor under the cursor.
 - Font: `lfMessageFont` from `SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS)`, sent to every control with `WM_SETFONT`.
 - Controls (x, y, w, h in 96-dpi units):
 
@@ -462,17 +466,20 @@ Opened from tray **Settings…** or by a second launch (`WM_APP_SETTINGS`). Only
 | Trackbar `msctls_trackbar32` | 100 | 10,40,340,30 | `TBS_AUTOTICKS`, range 5–50, ticks every 5, page 5 |
 | STATIC "Items to keep in history (1-100)" | – | 16,88,260,20 | |
 | EDIT (client edge, `ES_NUMBER`, right-aligned) | 103 | 284,85,60,24 | max 3 characters |
-| STATIC "Position" | – | 16,118,260,20 | |
-| Radio "Right side of the screen" | 101 | 24,140,300,22 | `WS_GROUP`, auto radio |
-| Radio "Left side of the screen" | 102 | 24,164,300,22 | auto radio |
-| Button OK (default) | IDOK | 168,202,84,28 | `WS_GROUP` |
-| Button Cancel | IDCANCEL | 260,202,84,28 | |
+| STATIC "Show delay when holding Win (ms, 0-2000)" | – | 16,122,260,20 | |
+| EDIT (client edge, `ES_NUMBER`, right-aligned) | 104 | 284,119,60,24 | max 4 characters |
+| STATIC "Position" | – | 16,152,260,20 | |
+| Radio "Right side of the screen" | 101 | 24,174,300,22 | `WS_GROUP`, auto radio |
+| Radio "Left side of the screen" | 102 | 24,198,300,22 | auto radio |
+| Button OK (default) | IDOK | 168,236,84,28 | `WS_GROUP` |
+| Button Cancel | IDCANCEL | 260,236,84,28 | |
 
 - Focus starts on the trackbar. Tab moves between controls, Enter = OK, Esc = Cancel (through `IsDialogMessageW` in the main loop).
 - **OK**:
   - width = trackbar position (5–50);
   - side = Right if the right radio is checked, else Left;
   - count = the edit text parsed as a number (10 if invalid), clamped to 1–100;
+  - delay = the delay edit parsed as a number (0 if invalid), at most 2000;
   - then `app::apply_settings` (section 8) and close.
 - **Cancel** / close button: close without changes.
 - `WM_DESTROY` frees the font and the control state.
@@ -590,11 +597,11 @@ Errors show "Setup failed: …" (unless silent) and set exit code 1. User data i
 
 ## 18. Tests
 
-`cargo test --release` (app, 41 tests):
+`cargo test --release` (app, 42 tests):
 
 | Module | Tests |
 |---|---|
-| hook | quick tap; hold → SHOW, release → COMMIT + inject; V/C navigation and swallowing; B → SHOW + DELETE, swallowed, Start menu masked; S taken only with an image and no modifiers (Win+S Search and Win+Shift+S pass); Win+E passthrough; other key while shown → CANCEL; modifiers; Esc cancel + mask; Esc before overlay; C/V without Win |
+| hook | quick tap; quick tap with the overlay already shown → CANCEL and Win up passes (Start opens), also across tick-counter wrap; a quick V is not a tap; hold → SHOW, release → COMMIT + inject; V/C navigation and swallowing; B → SHOW + DELETE, swallowed, Start menu masked; S taken only with an image and no modifiers (Win+S Search and Win+Shift+S pass); Win+E passthrough; other key while shown → CANCEL; modifiers; Esc cancel + mask; Esc before overlay; C/V without Win |
 | store | item round trip; bit flip / truncation / empty rejected; index round trip + cleanup; broken index → scan; writer thread + double shutdown; **1000 items with a limit of 10 → exactly 10 item files + index on disk, newest 10 loaded in order** |
 | preview | DROPFILES parsing; text / RTF / files / image previews; thumbnail scaling; small image not enlarged; bad DIBs rejected |
 | history | duplicate key with extra formats; registered formats hashed by name; different text; `keep_visible` scrolling |
@@ -610,6 +617,8 @@ Manual checks done:
 - memory: about 1.7 MB private when empty, about 1.9 MB with 10 items;
 - simulated Win hold + V presses: overlay shown, clipboard went back 2 items;
 - Win+S (simulated) with a 1920×1080 image: PNG saved to `OneDrive\Pictures\Clipboard`, 1920×1080, about 240 ms; clipboard afterwards held the file (file-drop list) and no image. The test file was deleted.
+- Zero delay (simulated): overlay visible 7 ms after Win down; quick tap (~100 ms) hid it and opened Start; 600 ms hold without keys did not open Start.
+- Settings window with the new delay field: screenshot checked; OK wrote `HoldDelayMs=0`.
 - Win+B (simulated): clipboard went from "del B" back to "del A", and the item was removed from the index;
 - settings window: opened by a second launch; screenshot checked (themed controls); OK wrote `WidthPercent=20`, `Position=left`, `MaxItems=25` to the INI, and the values were set back afterwards.
 

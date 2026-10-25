@@ -1,4 +1,4 @@
-//! Settings window (tray → Settings…): overlay width, left/right placement, history size.
+//! Settings window (tray → Settings…): overlay width, history size, show delay, left/right placement.
 //! Plain Win32 controls; themed via the Common Controls v6 manifest.
 
 use crate::app;
@@ -18,6 +18,7 @@ const ID_TRACK: usize = 100;
 const ID_RIGHT: usize = 101;
 const ID_LEFT: usize = 102;
 const ID_COUNT: usize = 103;
+const ID_DELAY: usize = 104;
 
 const TBM_GETPOS: u32 = WM_USER;
 const TBM_SETPOS: u32 = WM_USER + 5;
@@ -43,6 +44,7 @@ struct Ui {
     value: HWND,
     right: HWND,
     count: HWND,
+    delay: HWND,
     font: HFONT,
 }
 
@@ -56,7 +58,7 @@ pub fn hwnd() -> HWND {
 }
 
 /// Open the window (or bring it to front) with the current values.
-pub fn open(width_pct: u32, side: Side, max_items: usize) {
+pub fn open(width_pct: u32, side: Side, max_items: usize, hold_ms: u32) {
     unsafe {
         let h = hwnd();
         if !h.is_null() {
@@ -85,7 +87,7 @@ pub fn open(width_pct: u32, side: Side, max_items: usize) {
         let s = |v: i32| v * dpi as i32 / 96;
 
         // Size and center on the monitor under the cursor.
-        let mut r = RECT { left: 0, top: 0, right: s(360), bottom: s(242) };
+        let mut r = RECT { left: 0, top: 0, right: s(360), bottom: s(276) };
         AdjustWindowRectExForDpi(&mut r, STYLE, 0, 0, dpi);
         let (ww, wh) = (r.right - r.left, r.bottom - r.top);
         let mut pt = std::mem::zeroed();
@@ -119,14 +121,17 @@ pub fn open(width_pct: u32, side: Side, max_items: usize) {
         child("STATIC", &format!("Items to keep in history (1-{})", MAX_ITEMS_LIMIT), 0, 16, 88, 260, 20, 0);
         let count = child("EDIT", &max_items.to_string(), WS_TABSTOP | ES_NUMBER_ | ES_RIGHT_, 284, 85, 60, 24, ID_COUNT);
         SendMessageW(count, EM_SETLIMITTEXT_, 3, 0);
-        child("STATIC", "Position", 0, 16, 118, 260, 20, 0);
-        let right = child("BUTTON", "Right side of the screen", WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON_, 24, 140, 300, 22, ID_RIGHT);
-        let left = child("BUTTON", "Left side of the screen", BS_AUTORADIOBUTTON_, 24, 164, 300, 22, ID_LEFT);
+        child("STATIC", "Show delay when holding Win (ms, 0-2000)", 0, 16, 122, 260, 20, 0);
+        let delay = child("EDIT", &hold_ms.to_string(), WS_TABSTOP | ES_NUMBER_ | ES_RIGHT_, 284, 119, 60, 24, ID_DELAY);
+        SendMessageW(delay, EM_SETLIMITTEXT_, 4, 0);
+        child("STATIC", "Position", 0, 16, 152, 260, 20, 0);
+        let right = child("BUTTON", "Right side of the screen", WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON_, 24, 174, 300, 22, ID_RIGHT);
+        let left = child("BUTTON", "Left side of the screen", BS_AUTORADIOBUTTON_, 24, 198, 300, 22, ID_LEFT);
         SendMessageW(if side == Side::Left { left } else { right }, BM_SETCHECK, BST_CHECKED_, 0);
-        child("BUTTON", "OK", WS_TABSTOP | WS_GROUP | BS_DEFPUSHBUTTON_, 168, 202, 84, 28, IDOK as usize);
-        child("BUTTON", "Cancel", WS_TABSTOP | BS_PUSHBUTTON_, 260, 202, 84, 28, IDCANCEL as usize);
+        child("BUTTON", "OK", WS_TABSTOP | WS_GROUP | BS_DEFPUSHBUTTON_, 168, 236, 84, 28, IDOK as usize);
+        child("BUTTON", "Cancel", WS_TABSTOP | BS_PUSHBUTTON_, 260, 236, 84, 28, IDCANCEL as usize);
 
-        let ui: &'static Ui = Box::leak(Box::new(Ui { hwnd, track, value, right, count, font }));
+        let ui: &'static Ui = Box::leak(Box::new(Ui { hwnd, track, value, right, count, delay, font }));
         UI.with(|u| u.set(Some(ui)));
         update_value();
         ShowWindow(hwnd, SW_SHOW);
@@ -151,10 +156,14 @@ fn apply() {
     unsafe {
         let width = SendMessageW(ui.track, TBM_GETPOS, 0, 0).clamp(5, 50) as u32;
         let side = if SendMessageW(ui.right, BM_GETCHECK, 0, 0) as usize == BST_CHECKED_ { Side::Right } else { Side::Left };
-        let mut buf = [0u16; 8];
-        let n = GetWindowTextW(ui.count, buf.as_mut_ptr(), buf.len() as i32).max(0) as usize;
-        let count = String::from_utf16_lossy(&buf[..n]).trim().parse::<usize>().unwrap_or(10).clamp(1, MAX_ITEMS_LIMIT);
-        app::apply_settings(width, side, count);
+        let number = |h: HWND| {
+            let mut buf = [0u16; 8];
+            let n = GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32).max(0) as usize;
+            String::from_utf16_lossy(&buf[..n]).trim().parse::<u32>().ok()
+        };
+        let count = number(ui.count).unwrap_or(10).clamp(1, MAX_ITEMS_LIMIT as u32) as usize;
+        let delay = number(ui.delay).unwrap_or(0).min(2000);
+        app::apply_settings(width, side, count, delay);
     }
 }
 

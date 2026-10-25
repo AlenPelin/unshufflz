@@ -32,6 +32,8 @@ const VK_C: u32 = 0x43;
 const VK_V: u32 = 0x56;
 const VK_B: u32 = 0x42;
 const VK_S: u32 = 0x53;
+/// Releasing Win sooner than this without pressing C/V/B/S counts as a tap: Start opens.
+pub const TAP_MS: u32 = 300;
 const VK_ESC: u32 = 0x1B;
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -54,11 +56,17 @@ pub struct St {
     pub mods: u8,
     /// The current clipboard item is an image (Win+S is only taken then).
     pub image: bool,
+    /// Time of the current event (KBDLLHOOKSTRUCT.time, ms).
+    pub now: u32,
+    /// Time Win went down.
+    pub down_time: u32,
+    /// C/V/B/S was pressed during this Win hold.
+    pub acted: bool,
 }
 
 impl St {
     pub const fn new() -> St {
-        St { phase: Phase::Idle, win: 0, mods: 0, image: false }
+        St { phase: Phase::Idle, win: 0, mods: 0, image: false, now: 0, down_time: 0, acted: false }
     }
 }
 
@@ -102,6 +110,8 @@ pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
         if down && is_win(vk) {
             s.phase = Phase::Armed;
             s.win = vk;
+            s.down_time = s.now;
+            s.acted = false;
             o.start_timer = true;
         }
         return o;
@@ -112,6 +122,11 @@ pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
         }
         o.stop_timer = true;
         match std::mem::replace(&mut s.phase, Phase::Idle) {
+            // Quick tap with the overlay already up (short or zero hold delay):
+            // hide it and let Win up through, so Start opens as usual.
+            Phase::Shown if !s.acted && s.now.wrapping_sub(s.down_time) < TAP_MS => {
+                o.posts.push(A_CANCEL);
+            }
             Phase::Shown => {
                 o.posts.push(A_COMMIT);
                 o.swallow = true;
@@ -134,6 +149,7 @@ pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
     if vk == VK_C || vk == VK_V || vk == VK_B || save {
         o.swallow = true;
         if down {
+            s.acted = true;
             if s.phase != Phase::Shown {
                 o.stop_timer = true;
                 s.phase = Phase::Shown;
@@ -189,6 +205,11 @@ thread_local! {
     static TIMER: RefCell<usize> = const { RefCell::new(0) };
 }
 
+/// Change the hold delay (settings window).
+pub fn set_hold_ms(ms: u32) {
+    HOLD_MS.store(ms, Ordering::Relaxed);
+}
+
 /// Start the hook thread. Actions are posted to `main` as WM_APP_HOOK(wParam = action).
 pub fn start(main: HWND, hold_ms: u32) {
     MAIN.store(main as isize, Ordering::Relaxed);
@@ -242,6 +263,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             let (o, win) = ST.with(|s| {
                 let mut s = s.borrow_mut();
                 s.image = IMAGE.load(Ordering::Relaxed);
+                s.now = k.time;
                 let win = s.win;
                 (step(&mut s, k.vkCode, down), win)
             });
@@ -249,7 +271,14 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 set_timer(false);
             }
             if o.start_timer {
-                set_timer(true);
+                if HOLD_MS.load(Ordering::Relaxed) == 0 {
+                    // No delay: show right away instead of via a timer.
+                    if let Some(a) = ST.with(|s| on_hold(&mut s.borrow_mut())) {
+                        post(a);
+                    }
+                } else {
+                    set_timer(true);
+                }
             }
             for a in &o.posts {
                 post(*a);
@@ -327,10 +356,39 @@ mod tests {
         assert_eq!(on_hold(&mut s), Some(A_SHOW));
         let o = step(&mut s, VK_LWIN_, true); // auto-repeat
         assert_eq!(o, Out::default());
+        s.now = TAP_MS + 50; // held long enough: not a tap
         let o = step(&mut s, VK_LWIN_, false);
         assert_eq!(o.posts, vec![A_COMMIT]);
         assert!(o.swallow && o.inject);
         assert_eq!(s.phase, Phase::Idle);
+    }
+
+    #[test]
+    fn quick_tap_with_overlay_shown_opens_start() {
+        // zero hold delay: overlay is up at once, a quick release still opens Start
+        let mut s = st();
+        s.now = 1000;
+        step(&mut s, VK_LWIN_, true);
+        assert_eq!(on_hold(&mut s), Some(A_SHOW));
+        s.now = 1000 + TAP_MS - 1;
+        let o = step(&mut s, VK_LWIN_, false);
+        assert_eq!(o.posts, vec![A_CANCEL]);
+        assert!(!o.swallow && !o.inject);
+        // a quick V press is not a tap: release commits
+        s.now = 5000;
+        step(&mut s, VK_LWIN_, true);
+        on_hold(&mut s);
+        step(&mut s, VK_V, true);
+        s.now = 5010;
+        let o = step(&mut s, VK_LWIN_, false);
+        assert_eq!(o.posts, vec![A_COMMIT]);
+        assert!(o.swallow && o.inject);
+        // tick counter wrap-around is handled
+        s.now = u32::MAX - 10;
+        step(&mut s, VK_LWIN_, true);
+        on_hold(&mut s);
+        s.now = 20; // 31 ms later
+        assert_eq!(step(&mut s, VK_LWIN_, false).posts, vec![A_CANCEL]);
     }
 
     #[test]

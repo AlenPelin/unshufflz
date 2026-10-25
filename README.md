@@ -47,7 +47,7 @@ The app runs in the background and adds a tray icon.
 
 | Keys | Result |
 |---|---|
-| Hold **Win** (250 ms) | Overlay appears with the current clipboard item |
+| Hold **Win** | Overlay appears at once (about 7 ms) with the current clipboard item. A delay can be set in Settings. |
 | Hold Win + **V** | Go 1 step back in history (older item) |
 | Hold Win + **C** | Go 1 step forward in history (newer item) |
 | Hold Win + **B** | Delete the highlighted item from history (and disk). If it was the current clipboard item, the next older item goes on the clipboard right away (or the clipboard is emptied if nothing is left). Press B again to delete more. |
@@ -55,7 +55,7 @@ The app runs in the background and adds a tray icon.
 | Hold Win + **S** (current item is an image) | Save the image as PNG to `Pictures\Clipboard\Unshufflz_yyyyMMdd_HHmmss.png`. In history and on the clipboard, the image is replaced by the saved file, as if you had copied it in Explorer, so Ctrl+V pastes the file. If the current item is not an image, or Shift/Ctrl/Alt is held, Win+S does its normal Windows thing (Search; Win+Shift+S = snipping). |
 | Hold Win + **Esc** | Close the overlay without changing anything |
 | Hold Win + other key (Win+E, Win+D, …) | Overlay closes and the normal Windows shortcut runs |
-| Quick Win tap | Start menu opens as usual |
+| Quick Win tap (released within 300 ms, no other key) | The overlay flashes and hides, and the Start menu opens as usual. **This is expected and fine.** Holding Win longer and releasing it without pressing a key does not open Start. |
 
 The overlay shows:
 - **Header:** the position (`3 / 25`), the type and size of the content, when it was copied, and from which app.
@@ -84,17 +84,18 @@ The **Settings** window (tray menu → Settings…) has:
 |---|---|---|
 | Overlay width | 5–50 % of the screen width (slider) | 15 % |
 | Items to keep in history | 1–100 | 10 |
+| Show delay when holding Win | 0–2000 ms | 0 (instant) |
 | Position | Right side / Left side of the screen | Right |
 
 Changes apply when you press **OK**.
 - Making the history smaller removes the oldest items right away, from the list and from disk.
 - Settings are saved to `%LOCALAPPDATA%\Unshufflz\unshufflz.ini`.
 
-The same file can be edited by hand while the app is not running. It has two more settings that are not in the window:
+The same file can be edited by hand while the app is not running. It has one more setting that is not in the window:
 
 ```ini
 [General]
-HoldDelayMs=250   ; 50..2000  how long Win must be held before the overlay shows
+HoldDelayMs=0     ; 0..2000   how long Win must be held before the overlay shows (0 = instant)
 WidthPercent=15   ; 5..50
 Position=right    ; right | left
 MaxItems=10       ; 1..100
@@ -113,6 +114,7 @@ Files are written safely: a crash or power cut never leaves a broken file.
 
 ## Limitations
 
+- With the default delay of 0, the overlay also flashes briefly when you use other Win shortcuts (Win+E, Win+D, …) and on a quick Win tap before Start opens. This is expected. Set a show delay (e.g. 250 ms) in Settings if you don't want it.
 - While Win is held, **C**, **V** and **B** belong to Unshufflz. This blocks the built-in Win+V (Windows clipboard history), Win+C (Copilot) and Win+B (focus the tray icons). **S** is taken only when the current item is an image and no Shift/Ctrl/Alt is held, which blocks Windows Search in that case only.
 - Win+S saves only the current clipboard item, not an older item you moved to in the overlay.
 - Windows does not pass keys from admin (elevated) windows to normal apps. To use the overlay over admin windows, run Unshufflz as admin.

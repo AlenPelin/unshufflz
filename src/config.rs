@@ -1,5 +1,5 @@
 /// Settings in `%LOCALAPPDATA%\Unshufflz\unshufflz.ini` (all keys optional):
-///   HoldDelayMs=250   WidthPercent=15   Position=right   MaxItems=10   MaxItemMB=200
+///   HoldDelayMs=0   WidthPercent=15   Position=right   MaxItems=10   MaxItemMB=200
 /// The settings window rewrites this file.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Side {
@@ -18,7 +18,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { hold_ms: 250, width_pct: 15, side: Side::Right, max_items: 10, max_item_bytes: 200 << 20 }
+        Config { hold_ms: 0, width_pct: 15, side: Side::Right, max_items: 10, max_item_bytes: 200 << 20 }
     }
 }
 
@@ -39,7 +39,7 @@ pub fn parse(text: &str) -> Config {
         let v = v.trim();
         let n = v.parse::<u64>().ok();
         match (k.trim().to_ascii_lowercase().as_str(), n) {
-            ("holddelayms", Some(n)) => c.hold_ms = n.clamp(50, 2000) as u32,
+            ("holddelayms", Some(n)) => c.hold_ms = n.min(2000) as u32,
             ("widthpercent", Some(n)) => c.width_pct = n.clamp(5, 50) as u32,
             ("maxitems", Some(n)) => c.max_items = n.clamp(1, MAX_ITEMS_LIMIT as u64) as usize,
             ("maxitemmb", Some(n)) => c.max_item_bytes = n.clamp(1, 2048) << 20,
@@ -83,8 +83,9 @@ mod tests {
 
     #[test]
     fn values_are_clamped() {
-        let c = parse("HoldDelayMs=1\nWidthPercent=99\nMaxItemMB=0\nPosition=middle\nMaxItems=1000");
-        assert_eq!((c.hold_ms, c.width_pct, c.side, c.max_items, c.max_item_bytes), (50, 50, Side::Right, 100, 1 << 20));
+        let c = parse("HoldDelayMs=5000\nWidthPercent=99\nMaxItemMB=0\nPosition=middle\nMaxItems=1000");
+        assert_eq!((c.hold_ms, c.width_pct, c.side, c.max_items, c.max_item_bytes), (2000, 50, Side::Right, 100, 1 << 20));
+        assert_eq!(parse("HoldDelayMs=0").hold_ms, 0);
         assert_eq!(parse("MaxItems=0").max_items, 1);
     }
 

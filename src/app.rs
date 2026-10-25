@@ -57,8 +57,8 @@ fn thumb_width(width_pct: u32) -> i32 {
 }
 
 /// Called by the settings window on OK.
-pub fn apply_settings(width_pct: u32, side: Side, max_items: usize) {
-    with_app(|a| a.apply_settings(width_pct, side, max_items));
+pub fn apply_settings(width_pct: u32, side: Side, max_items: usize, hold_ms: u32) {
+    with_app(|a| a.apply_settings(width_pct, side, max_items, hold_ms));
 }
 
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
@@ -378,11 +378,13 @@ impl App {
         self.cfg.side
     }
 
-    fn apply_settings(&mut self, width_pct: u32, side: Side, max_items: usize) {
+    fn apply_settings(&mut self, width_pct: u32, side: Side, max_items: usize, hold_ms: u32) {
         let width_changed = width_pct != self.cfg.width_pct;
         self.cfg.width_pct = width_pct;
         self.cfg.side = side;
         self.cfg.max_items = max_items;
+        self.cfg.hold_ms = hold_ms;
+        hook::set_hold_ms(hold_ms);
         if self.items.len() > max_items {
             self.items.truncate(max_items);
             self.save_index(); // the writer then deletes the dropped item files
@@ -405,7 +407,7 @@ impl App {
 
     fn on_menu(&mut self, cmd: u32) {
         match cmd {
-            tray::ID_SETTINGS => settings::open(self.cfg.width_pct, self.cfg.side, self.cfg.max_items),
+            tray::ID_SETTINGS => settings::open(self.cfg.width_pct, self.cfg.side, self.cfg.max_items, self.cfg.hold_ms),
             tray::ID_CLEAR => {
                 self.items.clear();
                 self.sel = 0;
