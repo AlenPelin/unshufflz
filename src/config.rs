@@ -1,5 +1,5 @@
 /// Settings in `%LOCALAPPDATA%\Unshufflz\unshufflz.ini` (all keys optional):
-///   HoldDelayMs=0   WidthPercent=15   Position=right   MaxItems=10   MaxItemMB=200
+///   HoldDelayMs=0   WidthPercent=15   Position=right   MaxItems=10   MaxItemMB=200   PicturesDir=
 /// The settings window rewrites this file.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Side {
@@ -14,11 +14,13 @@ pub struct Config {
     pub side: Side,
     pub max_items: usize,
     pub max_item_bytes: u64,
+    /// Folder for Win+S pictures; empty = Pictures\Clipboard.
+    pub pictures_dir: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { hold_ms: 0, width_pct: 15, side: Side::Right, max_items: 10, max_item_bytes: 200 << 20 }
+        Config { hold_ms: 0, width_pct: 15, side: Side::Right, max_items: 10, max_item_bytes: 200 << 20, pictures_dir: String::new() }
     }
 }
 
@@ -43,6 +45,7 @@ pub fn parse(text: &str) -> Config {
             ("widthpercent", Some(n)) => c.width_pct = n.clamp(5, 50) as u32,
             ("maxitems", Some(n)) => c.max_items = n.clamp(1, MAX_ITEMS_LIMIT as u64) as usize,
             ("maxitemmb", Some(n)) => c.max_item_bytes = n.clamp(1, 2048) << 20,
+            ("picturesdir", _) => c.pictures_dir = v.to_string(),
             ("position", _) if v.eq_ignore_ascii_case("left") => c.side = Side::Left,
             ("position", _) if v.eq_ignore_ascii_case("right") => c.side = Side::Right,
             _ => {}
@@ -53,12 +56,13 @@ pub fn parse(text: &str) -> Config {
 
 pub fn format(c: &Config) -> String {
     format!(
-        "[General]\r\nHoldDelayMs={}\r\nWidthPercent={}\r\nPosition={}\r\nMaxItems={}\r\nMaxItemMB={}\r\n",
+        "[General]\r\nHoldDelayMs={}\r\nWidthPercent={}\r\nPosition={}\r\nMaxItems={}\r\nMaxItemMB={}\r\nPicturesDir={}\r\n",
         c.hold_ms,
         c.width_pct,
         if c.side == Side::Left { "left" } else { "right" },
         c.max_items,
-        c.max_item_bytes >> 20
+        c.max_item_bytes >> 20,
+        c.pictures_dir
     )
 }
 
@@ -91,7 +95,9 @@ mod tests {
 
     #[test]
     fn format_roundtrip() {
-        let c = Config { hold_ms: 300, width_pct: 22, side: Side::Left, max_items: 42, max_item_bytes: 7 << 20 };
+        let c = Config { hold_ms: 300, width_pct: 22, side: Side::Left, max_items: 42, max_item_bytes: 7 << 20, pictures_dir: r"D:\My Shots=1\x".into() };
         assert_eq!(parse(&format(&c)), c);
+        assert_eq!(parse("PicturesDir=").pictures_dir, "");
+        assert_eq!(parse("picturesdir =  C:\\a b  ").pictures_dir, "C:\\a b");
     }
 }

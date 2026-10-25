@@ -24,7 +24,7 @@ Current version: **0.2.0**. The version lives in the root `Cargo.toml`. The inst
 |---|---|
 | Language | Rust 2021, stable, target `x86_64-pc-windows-msvc` |
 | Windows API | `windows-sys` = **0.59.0** (pinned), raw Win32 calls |
-| COM (installer only) | `windows` = **0.58.0** (pinned), for `IShellLinkW` / `IPersistFile` |
+| COM | `windows` = **0.58.0** (pinned): installer `IShellLinkW` / `IPersistFile`; app `IFileOpenDialog` (folder picker). App features: `Win32_Foundation`, `Win32_System_Com`, `Win32_UI_Shell`, `Win32_UI_Shell_Common` |
 | Drawing | GDI (no Direct2D, no UI framework) |
 | Hashing | `xxhash-rust` 0.8, feature `xxh3` (`xxh3_64`, streaming `Xxh3`) |
 | PNG encoding | `png` 0.17 (pure Rust) |
@@ -253,13 +253,13 @@ Operations:
   4. Set `sel = min(sel, len−1)` (0 if empty) and save the index. The writer then deletes the item's file.
 - **Save image** (`save_image`, Win+S):
   1. Only if item 0 is of kind Image; get its payload (RAM or disk).
-  2. `imagesave::save_png(payload, Pictures\Clipboard)`. On failure: `MessageBeep(MB_ICONWARNING)`, nothing else changes.
+  2. `imagesave::save_png(payload, target_dir(cfg.pictures_dir))`. On failure: `MessageBeep(MB_ICONWARNING)`, nothing else changes.
   3. Remove item 0 (its file is deleted by the next cleanup).
   4. `add(file_payload(path), "unshufflz.exe")`.
   5. Restore the new item 0 to the clipboard and save `ignore_seq`.
 - **Clear**: empty the list, save an empty index.
-- **Apply settings** (`apply_settings(width, side, max_items, hold_ms)`):
-  1. Update the config, and pass `hold_ms` to the hook (`hook::set_hold_ms`).
+- **Apply settings** (`apply_settings(new_config)`; the settings window passes a full `Config`):
+  1. Pass `hold_ms` to the hook (`hook::set_hold_ms`) and replace the config.
   2. If the list is longer than `max_items`, cut it and save the index (the writer deletes the dropped files).
   3. Save the INI.
   4. If the width changed: recompute the thumbnail width and rebuild the previews of image items, from the payload in RAM or read from disk.
@@ -404,8 +404,9 @@ Order of checks:
 ## 12a. Saving images (`imagesave.rs`, Win+S)
 
 **Folder**:
-- `SHGetKnownFolderPath(FOLDERID_Pictures)` (follows OneDrive / folder redirection; the string is freed with `CoTaskMemFree`), plus `Clipboard`.
-- Fallback: `%USERPROFILE%\Pictures\Clipboard`.
+- `target_dir(PicturesDir)`: the `PicturesDir` setting (trimmed) if it is not empty, otherwise `default_dir()`.
+- `default_dir()` = `SHGetKnownFolderPath(FOLDERID_Pictures)` + `Clipboard`. The known folder follows OneDrive / folder redirection; the string is freed with `CoTaskMemFree`.
+- Fallback when the known folder fails: `%USERPROFILE%\Pictures\Clipboard`.
 - The folder is created when needed.
 
 **File name**: `Unshufflz_yyyyMMdd_HHmmss.png` in local time (`GetLocalTime`, 24-hour clock).
@@ -439,6 +440,7 @@ File: `%LOCALAPPDATA%\Unshufflz\unshufflz.ini`. It is read once at start and wri
 | `Position` | right | `right` / `left` (any case) |
 | `MaxItems` | 10 | 1–100 (`MAX_ITEMS_LIMIT`) |
 | `MaxItemMB` | 200 | 1–2048 |
+| `PicturesDir` | empty (= `Pictures\Clipboard`) | folder path, taken as-is (trimmed); `=` inside the path is fine because only the first `=` splits the line |
 
 Parsing:
 - Lines are `key=value`; keys are trimmed and case-insensitive.
@@ -446,16 +448,17 @@ Parsing:
 - Unknown keys, sections and bad values are ignored.
 
 Saving (`config::save`):
-- Writes all five keys under `[General]` with CRLF line ends, in the order above.
+- Writes all six keys under `[General]` with CRLF line ends: HoldDelayMs, WidthPercent, Position, MaxItems, MaxItemMB, PicturesDir.
 - Uses `util::write_file_safe`: `.tmp`, `sync_all`, `replace_file`.
 
 ## 14. Settings window (`settings.rs`)
 
 Opened from tray **Settings…** or by a second launch (`WM_APP_SETTINGS`). Only one copy can be open; opening it again brings it to the front.
+`settings::open(cfg: Config)` keeps a copy of the config. OK changes only the fields the window shows and passes the whole config to `app::apply_settings`.
 
 - `InitCommonControlsEx(ICC_BAR_CLASSES)`.
 - Class `UnshufflzSettings`: arrow cursor, `COLOR_BTNFACE` background. Title "Unshufflz Settings". Style `WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU` (fixed size).
-- Client area 360 × 276 (scaled by the window's DPI, sized with `AdjustWindowRectExForDpi`), centered on the work area of the monitor under the cursor.
+- Client area 360 × 332 (scaled by the window's DPI, sized with `AdjustWindowRectExForDpi`), centered on the work area of the monitor under the cursor.
 - Font: `lfMessageFont` from `SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS)`, sent to every control with `WM_SETFONT`.
 - Controls (x, y, w, h in 96-dpi units):
 
@@ -468,11 +471,14 @@ Opened from tray **Settings…** or by a second launch (`WM_APP_SETTINGS`). Only
 | EDIT (client edge, `ES_NUMBER`, right-aligned) | 103 | 284,85,60,24 | max 3 characters |
 | STATIC "Show delay when holding Win (ms, 0-2000)" | – | 16,122,260,20 | |
 | EDIT (client edge, `ES_NUMBER`, right-aligned) | 104 | 284,119,60,24 | max 4 characters |
-| STATIC "Position" | – | 16,152,260,20 | |
-| Radio "Right side of the screen" | 101 | 24,174,300,22 | `WS_GROUP`, auto radio |
-| Radio "Left side of the screen" | 102 | 24,198,300,22 | auto radio |
-| Button OK (default) | IDOK | 168,236,84,28 | `WS_GROUP` |
-| Button Cancel | IDCANCEL | 260,236,84,28 | |
+| STATIC "Save pictures (Win+S) to folder" | – | 16,156,328,20 | |
+| EDIT (client edge, `ES_AUTOHSCROLL`) | 105 | 16,178,240,24 | `PicturesDir`; cue banner (`EM_SETCUEBANNER`) = `default_dir()` |
+| Button "Browse…" | 106 | 262,177,82,26 | folder picker |
+| STATIC "Position" | – | 16,212,260,20 | |
+| Radio "Right side of the screen" | 101 | 24,234,300,22 | `WS_GROUP`, auto radio |
+| Radio "Left side of the screen" | 102 | 24,258,300,22 | auto radio |
+| Button OK (default) | IDOK | 168,292,84,28 | `WS_GROUP` |
+| Button Cancel | IDCANCEL | 260,292,84,28 | |
 
 - Focus starts on the trackbar. Tab moves between controls, Enter = OK, Esc = Cancel (through `IsDialogMessageW` in the main loop).
 - **OK**:
@@ -480,7 +486,12 @@ Opened from tray **Settings…** or by a second launch (`WM_APP_SETTINGS`). Only
   - side = Right if the right radio is checked, else Left;
   - count = the edit text parsed as a number (10 if invalid), clamped to 1–100;
   - delay = the delay edit parsed as a number (0 if invalid), at most 2000;
+  - pictures folder = `clean_dir(text)`: trimmed, surrounding `"` removed. It must be empty or an absolute path (`D:\x`, `\\server\share\x`). Otherwise a warning box ("Please enter a full folder path …") is shown, focus moves to the box, and the window stays open;
   - then `app::apply_settings` (section 8) and close.
+- **Browse…**:
+  1. COM `IFileOpenDialog` (`CoInitializeEx` STA on the main thread), options `FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST`, title "Folder for saved pictures", owner = the settings window.
+  2. It starts in the folder from the box (or `default_dir()`), or the nearest existing parent of it (`SHCreateItemFromParsingName` + `SetFolder`).
+  3. On OK, the chosen path (`SIGDN_FILESYSPATH`) is put in the box. Cancel changes nothing.
 - **Cancel** / close button: close without changes.
 - `WM_DESTROY` frees the font and the control state.
 
@@ -597,7 +608,7 @@ Errors show "Setup failed: …" (unless silent) and set exit code 1. User data i
 
 ## 18. Tests
 
-`cargo test --release` (app, 42 tests):
+`cargo test --release` (app, 44 tests):
 
 | Module | Tests |
 |---|---|
@@ -606,7 +617,8 @@ Errors show "Setup failed: …" (unless silent) and set exit code 1. User data i
 | preview | DROPFILES parsing; text / RTF / files / image previews; thumbnail scaling; small image not enlarged; bad DIBs rejected |
 | history | duplicate key with extra formats; registered formats hashed by name; different text; `keep_visible` scrolling |
 | config | defaults and overrides incl. Position and MaxItems; clamping; format → parse round trip |
-| imagesave | 24-bit bottom-up conversion; 32-bit alpha rules (all-zero → opaque, real alpha kept); 8-bit palette through GDI; broken / compressed DIBs rejected; PNG round trip (RGBA, and RGB when opaque); file names incl. `_2`; saving twice in one second makes two files; a `PNG` format is written as-is; file payload parses back to the path |
+| settings | folder box: empty OK, quotes removed, UNC OK, relative and drive-relative (`D:pics`) rejected |
+| imagesave | `target_dir` (empty → default `…\Clipboard`, else the setting); 24-bit bottom-up conversion; 32-bit alpha rules (all-zero → opaque, real alpha kept); 8-bit palette through GDI; broken / compressed DIBs rejected; PNG round trip (RGBA, and RGB when opaque); file names incl. `_2`; saving twice in one second makes two files; a `PNG` format is written as-is; file payload parses back to the path |
 | util | sizes; UTF-16 helpers; time format |
 
 `cargo test --release -p unshufflz-setup` (4 tests): argument parsing; install paths; path comparison helpers; the embedded app starts with `MZ`.
@@ -619,6 +631,13 @@ Manual checks done:
 - Win+S (simulated) with a 1920×1080 image: PNG saved to `OneDrive\Pictures\Clipboard`, 1920×1080, about 240 ms; clipboard afterwards held the file (file-drop list) and no image. The test file was deleted.
 - Zero delay (simulated): overlay visible 7 ms after Win down; quick tap (~100 ms) hid it and opened Start; 600 ms hold without keys did not open Start.
 - Settings window with the new delay field: screenshot checked; OK wrote `HoldDelayMs=0`.
+- Pictures folder setting:
+  - screenshot shows the grey default-folder hint;
+  - Browse… opened the Windows folder picker at `Pictures\Clipboard`;
+  - a relative path showed the warning and kept the window open;
+  - a quoted path was saved without quotes as `PicturesDir`;
+  - Win+S then saved `Unshufflz_….png` into that folder, and the clipboard held that file;
+  - the setting was set back to empty afterwards.
 - Win+B (simulated): clipboard went from "del B" back to "del A", and the item was removed from the index;
 - settings window: opened by a second launch; screenshot checked (themed controls); OK wrote `WidthPercent=20`, `Position=left`, `MaxItems=25` to the INI, and the values were set back afterwards.
 

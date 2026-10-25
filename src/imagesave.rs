@@ -158,6 +158,16 @@ pub fn pictures_dir() -> PathBuf {
     std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join("Pictures")
 }
 
+/// Default folder for Win+S pictures: Pictures\Clipboard.
+pub fn default_dir() -> PathBuf {
+    pictures_dir().join("Clipboard")
+}
+
+/// Folder for Win+S pictures from the `PicturesDir` setting (empty = default).
+pub fn target_dir(setting: &str) -> PathBuf {
+    if setting.trim().is_empty() { default_dir() } else { PathBuf::from(setting.trim()) }
+}
+
 /// Save the image in `p` into `dir` as a new PNG file and return its path.
 /// Uses the "PNG" clipboard format as-is when present, else converts the DIB.
 pub fn save_png(p: &Payload, dir: &Path) -> io::Result<PathBuf> {
@@ -288,6 +298,13 @@ mod tests {
         let mut out = Vec::new();
         encode_png(1, 1, &[1, 2, 3, 255], &mut out).unwrap();
         assert_eq!(png::Decoder::new(&out[..]).read_info().unwrap().info().color_type, png::ColorType::Rgb);
+    }
+
+    #[test]
+    fn target_folder_setting() {
+        assert!(target_dir("").ends_with("Clipboard"));
+        assert!(target_dir("  ").ends_with("Clipboard"));
+        assert_eq!(target_dir(r"D:\Shots"), PathBuf::from(r"D:\Shots"));
     }
 
     #[test]

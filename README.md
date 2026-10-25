@@ -52,7 +52,7 @@ The app runs in the background and adds a tray icon.
 | Hold Win + **C** | Go 1 step forward in history (newer item) |
 | Hold Win + **B** | Delete the highlighted item from history (and disk). If it was the current clipboard item, the next older item goes on the clipboard right away (or the clipboard is emptied if nothing is left). Press B again to delete more. |
 | Release **Win** | The selected item becomes the clipboard content and moves to the top of the list. If you did not move, the clipboard stays as it is. Nothing is pasted automatically, so press Ctrl+V yourself. |
-| Hold Win + **S** (current item is an image) | Save the image as PNG to `Pictures\Clipboard\Unshufflz_yyyyMMdd_HHmmss.png`. In history and on the clipboard, the image is replaced by the saved file, as if you had copied it in Explorer, so Ctrl+V pastes the file. If the current item is not an image, or Shift/Ctrl/Alt is held, Win+S does its normal Windows thing (Search; Win+Shift+S = snipping). |
+| Hold Win + **S** (current item is an image) | Save the image as PNG to `Pictures\Clipboard\Unshufflz_yyyyMMdd_HHmmss.png` (the folder can be changed in Settings). In history and on the clipboard, the image is replaced by the saved file, as if you had copied it in Explorer, so Ctrl+V pastes the file. If the current item is not an image, or Shift/Ctrl/Alt is held, Win+S does its normal Windows thing (Search; Win+Shift+S = snipping). |
 | Hold Win + **Esc** | Close the overlay without changing anything |
 | Hold Win + other key (Win+E, Win+D, …) | Overlay closes and the normal Windows shortcut runs |
 | Quick Win tap (released within 300 ms, no other key) | The overlay flashes and hides, and the Start menu opens as usual. **This is expected and fine.** Holding Win longer and releasing it without pressing a key does not open Start. |
@@ -85,10 +85,12 @@ The **Settings** window (tray menu → Settings…) has:
 | Overlay width | 5–50 % of the screen width (slider) | 15 % |
 | Items to keep in history | 1–100 | 10 |
 | Show delay when holding Win | 0–2000 ms | 0 (instant) |
+| Save pictures (Win+S) to folder | any full folder path; **Browse…** opens the Windows folder picker | empty = `Pictures\Clipboard` (shown as a grey hint) |
 | Position | Right side / Left side of the screen | Right |
 
 Changes apply when you press **OK**.
 - Making the history smaller removes the oldest items right away, from the list and from disk.
+- The pictures folder must be a full path (e.g. `D:\Screenshots`; quotes from Explorer's "Copy as path" are removed). It is created on the first save if it does not exist. Leave it empty for the default.
 - Settings are saved to `%LOCALAPPDATA%\Unshufflz\unshufflz.ini`.
 
 The same file can be edited by hand while the app is not running. It has one more setting that is not in the window:
@@ -100,6 +102,7 @@ WidthPercent=15   ; 5..50
 Position=right    ; right | left
 MaxItems=10       ; 1..100
 MaxItemMB=200     ; 1..2048   clipboard content bigger than this is not stored
+PicturesDir=      ; folder for Win+S pictures; empty = Pictures\Clipboard
 ```
 
 ## Where data is stored

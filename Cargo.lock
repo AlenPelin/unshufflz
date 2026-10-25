@@ -128,6 +128,7 @@ name = "unshufflz"
 version = "0.2.0"
 dependencies = [
  "png",
+ "windows",
  "windows-sys",
  "xxhash-rust",
 ]
