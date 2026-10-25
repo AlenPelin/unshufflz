@@ -3,7 +3,7 @@
 This document describes the app and its installer in enough detail to rebuild them from scratch.
 User-facing usage is in [README.md](README.md). Every change to the app must be reflected here.
 
-Current version: **0.2.0**. The version lives in the root `Cargo.toml`. The installer reads it from there, so `installer/Cargo.toml`'s own version does not matter.
+Current version: **0.3.0**. The version lives in the root `Cargo.toml`. The installer reads it from there, so `installer/Cargo.toml`'s own version does not matter.
 
 ## 1. Goals
 
@@ -24,7 +24,7 @@ Current version: **0.2.0**. The version lives in the root `Cargo.toml`. The inst
 |---|---|
 | Language | Rust 2021, stable, target `x86_64-pc-windows-msvc` |
 | Windows API | `windows-sys` = **0.59.0** (pinned), raw Win32 calls |
-| COM | `windows` = **0.58.0** (pinned): installer `IShellLinkW` / `IPersistFile`; app `IFileOpenDialog` (folder picker). App features: `Win32_Foundation`, `Win32_System_Com`, `Win32_UI_Shell`, `Win32_UI_Shell_Common` |
+| COM | `windows` = **0.58.0** (pinned): installer `IShellLinkW` / `IPersistFile`; app `IFileOpenDialog` (folder picker) and OLE drag of file items (`OleInitialize`, `SHCreateDataObject`, `SHDoDragDrop`, `ILCreateFromPathW`). App features: `Win32_Foundation`, `Win32_System_Com`, `Win32_System_Ole`, `Win32_UI_Shell`, `Win32_UI_Shell_Common` |
 | Drawing | GDI (no Direct2D, no UI framework) |
 | Hashing | `xxhash-rust` 0.8, feature `xxh3` (`xxh3_64`, streaming `Xxh3`) |
 | PNG encoding | `png` 0.17 (pure Rust) |
@@ -61,6 +61,7 @@ Installer features:
 | `src/imagesave.rs` | Win+S: DIB parsing / conversion to RGBA, PNG encoding, file naming, Pictures folder, "copied file" payload |
 | `src/preview.rs` | `Preview` / `Kind` / `Thumb`; preview building; DROPFILES parsing; DIB thumbnails |
 | `src/paint.rs` | `Fonts`, `LIST_ROWS`, `OPACITY`; `render` (draw + `UpdateLayeredWindow`), `compose` (slide shift + alpha) |
+| `src/drag.rs` | `init` (OleInitialize), `drag_files`: shell drag of file paths out of the overlay (section 10a) |
 | `src/anim.rs` | Slide-in curve: `cubic_bezier`, `SLIDE`, `slide_offset` |
 | `src/settings.rs` | Settings window |
 | `src/store.rs` | Disk format, safe writes, writer thread, loading, cleanup |
@@ -76,6 +77,7 @@ Installer features:
 ## 4. Startup and shutdown (app)
 
 Startup (`main` → `app::run`):
+0. `OleInitialize` on the main thread (needed for drag and drop, section 10a).
 1. `CreateMutexW("Local\\UnshufflzSingleInstance")`. If it fails or the mutex already exists, another copy is running:
    - `FindWindowW("UnshufflzOverlay")`, then `AllowSetForegroundWindow(its pid)` so it may come to the front;
    - post `WM_APP_SETTINGS` to it (it opens its settings window), then exit.
@@ -349,7 +351,7 @@ If `max_items` was lowered while the app was not running, the extra items are no
 
 ## 10. Overlay window
 
-- Class `UnshufflzOverlay`, window title `Unshufflz`, style `WS_POPUP`. Extended style `TOPMOST | TOOLWINDOW | NOACTIVATE | LAYERED | TRANSPARENT`. Opacity 245/255, applied per pixel in `render`.
+- Class `UnshufflzOverlay` (class cursor `IDC_ARROW`), window title `Unshufflz`, style `WS_POPUP`. Extended style `TOPMOST | TOOLWINDOW | NOACTIVATE | LAYERED | TRANSPARENT`. `TRANSPARENT` (mouse goes through) is removed while a file item is shown, see 10a. Opacity 245/255, applied per pixel in `render`.
 - `WM_MOUSEACTIVATE` → `MA_NOACTIVATE`. `WM_ERASEBKGND` → 1. `WM_DPICHANGED` → 0. `WM_CLOSE` → default (destroys the window, which exits the app).
 - **Show**:
   1. Take the monitor under the cursor.
@@ -364,6 +366,18 @@ If `max_items` was lowered while the app was not running, the extra items are no
      - measured at 60 Hz: 3 frames, done 47–61 ms after Win down. With 1000 ms: 53 frames, done after 916 ms (the eased offset rounds to 0 before the end).
   7. Hiding is instant (no animation).
 - **Hide**: `SW_HIDE`, stop timer 2.
+
+## 10a. Dragging files out (`drag.rs`, `app.rs`)
+
+When the shown (selected) item is a file item, its files can be dragged with the mouse from the overlay's file panel to Explorer, the desktop, a browser or any app that accepts dropped files.
+- `render` (section 11) records `app.drag_area` = the preview rect (window coordinates) when the shown item is **Files**, else an empty rect; and `app.drag_rows` = the drawn file rows as (top, bottom, file index).
+- After each render (`show`, `invalidate`), `update_click_through`: `WS_EX_TRANSPARENT` is cleared if `drag_area` is not empty, set otherwise (`SetWindowLongW(GWL_EXSTYLE)`). So for all other kinds the overlay stays click-through as before.
+- `WM_SETCURSOR`: `IDC_HAND` while the cursor is inside `drag_area` (and the overlay is visible), else `IDC_ARROW`. Returns 1.
+- `WM_LBUTTONDOWN` at (x, y):
+  1. `drag_paths(x, y)` (inside the app borrow): empty if the point is outside `drag_area`. Otherwise the item's payload (RAM or disk, as in section 8) → its CF_HDROP → `parse_hdrop`. If the point is on a file row, only that file; elsewhere in the panel (folder line, `+N more`, empty space), all files.
+  2. Outside the app borrow: `DragDetect(hwnd, screen point)`; if the mouse moved past the drag threshold with the button down, `drag::drag_files`. The drag runs outside the borrow so hook messages that arrive during it (Win released → commit/hide) are still handled; the overlay may hide during the drag and the drag goes on.
+- `drag_files(paths)`: `ILCreateFromPathW` for each path (missing files are skipped), `SHCreateDataObject(pidlFolder = desktop, absolute PIDLs)` (works for files from different folders). The desktop is an **empty ID list** (2 zero bytes); `pidlFolder = NULL` gives an empty data object (no CF_HDROP), so every drop target refuses it, then `SHDoDragDrop(hwnd, data, NULL drop source, DROPEFFECT_COPY | DROPEFFECT_LINK)`. The shell's default drop source shows drag images. **Move is not offered**, so a drop never moves the original file (Shift is ignored; Alt gives a shortcut). `ILFree` the PIDLs afterwards. Debug log: `main drag N files: <result>`.
+- Usage: hold Win (overlay shows), select a file item with V/C, then press the mouse on the file panel and drag. Win may be released during the drag. With ShowWithStart, the overlay also stays after Win is released while Start is open, so it can be dragged from then too.
 
 ## 11. Drawing (`paint.rs`)
 
@@ -670,7 +684,7 @@ Errors show "Setup failed: …" (unless silent) and set exit code 1. User data i
 
 ## 18. Tests
 
-`cargo test --release` (app, 49 tests):
+`cargo test --release` (app, 50 tests):
 
 | Module | Tests |
 |---|---|
@@ -684,6 +698,7 @@ Errors show "Setup failed: …" (unless silent) and set exit code 1. User data i
 | settings | folder box: empty OK, quotes removed, UNC OK, relative and drive-relative (`D:pics`) rejected |
 | imagesave | `target_dir` (empty → default `…\Clipboard`, else the setting); 24-bit bottom-up conversion; 32-bit alpha rules (all-zero → opaque, real alpha kept); 8-bit palette through GDI; broken / compressed DIBs rejected; PNG round trip (RGBA, and RGB when opaque); file names incl. `_2`; saving twice in one second makes two files; a `PNG` format is written as-is; file payload parses back to the path |
 | util | sizes; UTF-16 helpers; time format |
+| drag | the shell data object for two files in different folders offers CF_HDROP (guards against the empty-object `pidlFolder = NULL` mistake) |
 
 `cargo test --release -p unshufflz-setup` (4 tests): argument parsing; install paths; path comparison helpers; the embedded app starts with `MZ`.
 
@@ -734,6 +749,7 @@ Not yet checked by hand:
 - Admin windows give no keys to the hook unless the app runs as admin.
 - Stored data is not encrypted.
 - File items store paths only.
+- Dragging files out of the overlay offers copy and link only, never move.
 - Thumbnails ignore alpha. RLE / JPEG / PNG-compressed DIBs get no thumbnail but are still stored and restored.
 - If the hook misses a Win up, timer 2 hides the overlay; the next Win press is recognised as new by the stale-press rule (6.3, rule 0).
 - ShowWithStart: the Windows Search panel shares SearchHost.exe with Start on newer Windows 11, so the overlay also shows with Search. If Start is set to open on the left edge and the overlay is on the left, Start covers it (Start is drawn in a higher layer than topmost windows).

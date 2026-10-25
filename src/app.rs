@@ -1,5 +1,6 @@
 use crate::clip::{self, Payload};
 use crate::config::{self, Config, Side};
+use crate::drag;
 use crate::history::{self, Item, RAM_LIMIT};
 use crate::hook::{self, A_CANCEL, A_COMMIT, A_DELETE, A_NEXT, A_PREV, A_SAVE, A_SHOW, A_TAP, WM_APP_HOOK};
 use crate::imagesave;
@@ -22,7 +23,7 @@ use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_RWIN};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{DragDetect, GetAsyncKeyState, VK_LWIN, VK_RWIN};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 pub const WM_APP_SAVED: u32 = WM_APP + 2;
@@ -54,6 +55,10 @@ pub struct App {
     /// DPI of that monitor.
     pub dpi: u32,
     pub fonts: Fonts,
+    /// File panel of the shown item, in window coordinates (empty if it is not a file item).
+    pub drag_area: RECT,
+    /// File rows drawn in the file panel: (top, bottom, file index).
+    pub drag_rows: Vec<(i32, i32, usize)>,
     cfg: Config,
     fmts: clip::Formats,
     visible: bool,
@@ -88,12 +93,14 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 
 pub fn run(cfg: Config) {
     unsafe {
+        drag::init();
         let inst = GetModuleHandleW(null());
         let class = wide("UnshufflzOverlay");
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: inst,
+            hCursor: LoadCursorW(null_mut(), IDC_ARROW),
             lpszClassName: class.as_ptr(),
             ..std::mem::zeroed()
         };
@@ -126,6 +133,8 @@ pub fn run(cfg: Config) {
             frame: (0, 0, 0, 0),
             dpi: 96,
             fonts: Fonts::new(96),
+            drag_area: RECT { left: 0, top: 0, right: 0, bottom: 0 },
+            drag_rows: Vec::new(),
             fmts: clip::Formats::register(),
             visible: false,
             ignore_seq: 0,
@@ -395,6 +404,7 @@ impl App {
             SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             SetTimer(self.hwnd, TIMER_WATCH, 150, None);
             self.visible = true;
+            self.update_click_through();
             crate::util::debug(|| "main overlay shown".to_string());
             if animate {
                 self.slide_in(w);
@@ -484,7 +494,46 @@ impl App {
     fn invalidate(&mut self) {
         if self.visible {
             paint::render(self);
+            self.update_click_through();
         }
+    }
+
+    /// The overlay lets the mouse through, except while a file item is shown:
+    /// then its file panel can be dragged (see `drag_paths`).
+    fn update_click_through(&self) {
+        unsafe {
+            let ex = GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32;
+            let want = if self.has_drag_area() { ex & !WS_EX_TRANSPARENT } else { ex | WS_EX_TRANSPARENT };
+            if want != ex {
+                SetWindowLongW(self.hwnd, GWL_EXSTYLE, want as i32);
+            }
+        }
+    }
+
+    fn has_drag_area(&self) -> bool {
+        let r = self.drag_area;
+        r.right > r.left && r.bottom > r.top
+    }
+
+    fn in_drag_area(&self, x: i32, y: i32) -> bool {
+        let r = self.drag_area;
+        self.visible && x >= r.left && x < r.right && y >= r.top && y < r.bottom
+    }
+
+    /// Files to drag for a mouse press at (x, y) (window coordinates): the file under
+    /// the mouse, or all files of the shown item when pressed elsewhere in the panel.
+    fn drag_paths(&mut self, x: i32, y: i32) -> Vec<String> {
+        if !self.in_drag_area(x, y) || self.sel >= self.items.len() {
+            return Vec::new();
+        }
+        let row = self.drag_rows.iter().find(|r| y >= r.0 && y < r.1).map(|r| r.2);
+        let Some(p) = self.payload(self.sel) else { return Vec::new() };
+        let Some(f) = p.iter().find(|f| f.id == clip::CF_HDROP) else { return Vec::new() };
+        let mut paths = preview::parse_hdrop(&f.data);
+        if let Some(i) = row.filter(|&i| i < paths.len()) {
+            paths = vec![paths.swap_remove(i)];
+        }
+        paths
     }
 
     pub fn side(&self) -> Side {
@@ -604,6 +653,26 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         WM_ERASEBKGND => 1,
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
+        WM_SETCURSOR => {
+            let mut pt = std::mem::zeroed();
+            GetCursorPos(&mut pt);
+            ScreenToClient(h, &mut pt);
+            let hand = with_app(|a| a.in_drag_area(pt.x, pt.y)).unwrap_or(false);
+            SetCursor(LoadCursorW(null_mut(), if hand { IDC_HAND } else { IDC_ARROW }));
+            1
+        }
+        WM_LBUTTONDOWN => {
+            // Drag files out of the file panel. The drag runs outside the app borrow,
+            // so hook messages (e.g. Win released) are still handled during it.
+            let (x, y) = ((lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32);
+            let paths = with_app(|a| a.drag_paths(x, y)).unwrap_or_default();
+            let mut pt = POINT { x, y };
+            ClientToScreen(h, &mut pt);
+            if !paths.is_empty() && DragDetect(h, pt) != 0 {
+                drag::drag_files(h, &paths);
+            }
+            0
+        }
         WM_DPICHANGED => 0,
         tray::WM_APP_TRAY => {
             let ev = (lp & 0xFFFF) as u32;

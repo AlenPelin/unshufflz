@@ -4,6 +4,7 @@ mod anim;
 mod app;
 mod clip;
 mod config;
+mod drag;
 mod history;
 mod hook;
 mod imagesave;

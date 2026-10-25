@@ -55,6 +55,7 @@ The app runs in the background and adds a tray icon.
 | Hold Win + **B** | Delete the highlighted item from history (and disk). If it was the current clipboard item, the next older item goes on the clipboard right away (or the clipboard is emptied if nothing is left). Press B again to delete more. |
 | Release **Win** | The selected item becomes the clipboard content and moves to the top of the list. If you did not move, the clipboard stays as it is. Nothing is pasted automatically, so press Ctrl+V yourself. |
 | Hold Win + **S** (current item is an image) | Save the image as PNG to `Pictures\Clipboard\Unshufflz_yyyyMMdd_HHmmss.png` (the folder can be changed in Settings). In history and on the clipboard, the image is replaced by the saved file, as if you had copied it in Explorer, so Ctrl+V pastes the file. If the current item is not an image, or Shift/Ctrl/Alt is held, Win+S does its normal Windows thing (Search; Win+Shift+S = snipping). |
+| Hold Win, select a file item, then **drag its file panel with the mouse** | The files are dragged out like from Explorer: drop them into an Explorer window, the desktop, a browser upload, a chat app, etc. Press on one file name to drag only that file, or elsewhere in the panel to drag all of them. The drop always copies (or with Alt makes a shortcut); it never moves the original. You can release Win while dragging. |
 | Hold Win + **Esc** | Close the overlay without changing anything |
 | Hold Win + other key (Win+E, Win+D, …) | Overlay closes and the normal Windows shortcut runs |
 | Quick Win tap (released within 300 ms, no other key) | The overlay flashes and hides, and the Start menu opens as usual. **This is expected and fine.** Holding Win longer and releasing it without pressing a key does not open Start. With **"Also show while the Start menu is open"** on, the overlay stays instead (see below). |
@@ -64,7 +65,7 @@ The overlay shows:
 - **Preview:**
   - Text: the wrapped text.
   - Image: the picture and its size.
-  - Files: names and sizes.
+  - Files: names and sizes. The panel can be dragged with the mouse (the cursor turns into a hand over it).
   - Other formats: a list of formats.
 - **List:** the items, one line each, with the selected item highlighted. At most 10 rows are shown at once. With a larger history, the list scrolls as you move, so the selection stays visible (no scrollbar). The row numbers show where you are.
 

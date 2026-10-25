@@ -144,6 +144,7 @@ unsafe fn draw(app: &mut App, dc: HDC, wd: i32, ht: i32) {
         let f = &app.fonts;
         let n = app.items.len();
         let mut y = pad;
+        let mut drag = (rect(0, 0, 0, 0), Vec::new());
         text(dc, f.title, &w("Clipboard"), rect(x0, y, x1, y + s(24)), LINE1 | DT_LEFT, FG);
         if n == 0 {
             text(dc, f.body, &w("History is empty"), rect(x0, y + s(40), x1, y + s(64)), LINE1 | DT_LEFT, FG2);
@@ -165,7 +166,11 @@ unsafe fn draw(app: &mut App, dc: HDC, wd: i32, ht: i32) {
             let rows = n.min(LIST_ROWS);
             let first = keep_visible(sel, app.scroll, LIST_ROWS).min(n - rows);
             let list_top = ht - pad - row * rows as i32;
-            preview(dc, f, &it.preview, rect(x0, y, x1, list_top - s(16)), &s);
+            let pr = rect(x0, y, x1, list_top - s(16));
+            let rows_hit = preview(dc, f, &it.preview, pr, &s);
+            if it.preview.kind == Kind::Files {
+                drag = (pr, rows_hit);
+            }
             fill(dc, rect(x0, list_top - s(8), x1, list_top - s(8) + 1), LINE);
             for (i, item) in app.items.iter().enumerate().skip(first).take(rows) {
                 let top = list_top + row * (i - first) as i32;
@@ -176,12 +181,16 @@ unsafe fn draw(app: &mut App, dc: HDC, wd: i32, ht: i32) {
                 text(dc, f.body, &item.preview.line, rect(x0 + s(22), top, x1, top + row), LINE1 | DT_LEFT, if i == sel { FG } else { FG2 });
             }
         }
+        (app.drag_area, app.drag_rows) = drag;
     }
 }
 
-unsafe fn preview(dc: HDC, f: &Fonts, p: &Preview, r: RECT, s: &dyn Fn(i32) -> i32) {
+/// Draws the preview of the selected item. For files, returns the drawn file rows
+/// as (top, bottom, file index), used to drag a single file with the mouse.
+unsafe fn preview(dc: HDC, f: &Fonts, p: &Preview, r: RECT, s: &dyn Fn(i32) -> i32) -> Vec<(i32, i32, usize)> {
+    let mut rows = Vec::new();
     if r.bottom <= r.top {
-        return;
+        return rows;
     }
     let (rw, rh) = (r.right - r.left, r.bottom - r.top);
     match p.kind {
@@ -215,11 +224,13 @@ unsafe fn preview(dc: HDC, f: &Fonts, p: &Preview, r: RECT, s: &dyn Fn(i32) -> i
                 }
                 text(dc, f.body, name, rect(r.left, y, r.right - size_w, y + rh1), LINE1 | DT_LEFT, FG);
                 text(dc, f.small, size, rect(r.right - size_w, y, r.right, y + rh1), LINE1 | DT_RIGHT, FG2);
+                rows.push((y, y + rh1, i));
                 y += rh1;
             }
         }
         _ => text(dc, f.body, &p.text, r, DT_LEFT | DT_WORDBREAK | DT_EXPANDTABS | DT_EDITCONTROL, FG),
     }
+    rows
 }
 
 #[cfg(test)]
