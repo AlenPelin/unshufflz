@@ -10,6 +10,7 @@ Current version: **0.2.0**. The version lives in the root `Cargo.toml`. The inst
 - Keep the last **N** clipboard items (default 10, settable 1–100) of any kind: text, rich text, images, files, app-specific formats.
 - Show them in an **overlay** on the right (or left) side of the screen while **Win** is held.
 - Win+V = 1 step back (older), Win+C = 1 step forward (newer). Releasing Win puts the selected item on the clipboard. There is no automatic paste.
+- Win+B = delete the highlighted item. Deleting the current clipboard item puts the next older one on the clipboard, so "Ctrl+V, Win+B" pastes copied items newest first.
 - At most 10 list rows are visible. Longer histories scroll with the selection, without a scrollbar.
 - A **settings window** from the tray: width, side, history size.
 - Use very little memory and CPU. No browser engine, no JS, no .NET runtime.
@@ -102,7 +103,7 @@ Shutdown:
 
 | Message | Value | From → to | wParam / lParam |
 |---|---|---|---|
-| `WM_APP_HOOK` | `WM_APP+1` | hook → main | wParam = action (1 SHOW, 2 PREV, 3 NEXT, 4 COMMIT, 5 CANCEL) |
+| `WM_APP_HOOK` | `WM_APP+1` | hook → main | wParam = action (1 SHOW, 2 PREV, 3 NEXT, 4 COMMIT, 5 CANCEL, 6 DELETE) |
 | `WM_APP_SAVED` | `WM_APP+2` | writer → main | lParam = item id |
 | `WM_APP_TRAY` | `WM_APP+3` | shell → main | lParam low word = mouse message |
 | `WM_APP_SETTINGS` | `WM_APP+4` | second instance → main | open the settings window |
@@ -123,7 +124,7 @@ App state lives in a thread-local `RefCell<Option<App>>`. Handlers use `try_borr
 | Name | Value |
 |---|---|
 | VK_LWIN / VK_RWIN | 0x5B / 0x5C |
-| C / V / Esc | 0x43 / 0x56 / 0x1B |
+| C / V / B / Esc | 0x43 / 0x56 / 0x42 / 0x1B |
 | Modifiers (ignored) | 0x10–0x12, 0xA0–0xA5 |
 | Mask key | 0xE8 |
 | Injection marker (`dwExtraInfo`) | 0x434C4950 |
@@ -149,7 +150,7 @@ Rules for `step(vk, down)`, checked in this order:
      - from Cancelled → swallow, inject;
      - otherwise → pass.
 3. The other Win key, a modifier, or phase Passthrough → pass, no change.
-4. **C/V** (in Armed / Shown / Cancelled) → swallow both down and up. On down: if not Shown, then stop_timer, phase = Shown, post SHOW. Then post PREV (V) or NEXT (C).
+4. **C/V/B** (in Armed / Shown / Cancelled) → swallow both down and up. On down: if not Shown, then stop_timer, phase = Shown, post SHOW. Then post PREV (V), NEXT (C) or DELETE (B).
 5. **Esc** in Shown or Cancelled → swallow. On down in Shown → Cancelled, post CANCEL.
 6. **Any other key**: on down, post CANCEL if Shown, stop_timer, phase = Passthrough. The key passes.
 
@@ -162,7 +163,7 @@ The real Win up is swallowed. `SendInput` then sends, all with the marker:
 2. 0xE8 up
 3. Win up (`KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY`)
 
-Windows sees a key between Win down and Win up, so the Start menu stays closed. C/V never reach Windows.
+Windows sees a key between Win down and Win up, so the Start menu stays closed. C/V/B never reach Windows.
 
 ## 7. Clipboard (`clip.rs`)
 
@@ -194,7 +195,11 @@ Payload = Vec<Fmt>
 6. `CloseClipboard`.
 7. Source app: `GetClipboardOwner` (or the foreground window) → process id → `QueryFullProcessImageNameW` → exe file name.
 
-### 7.3 Restore
+### 7.3 Clear
+
+`clip::clear`: open the clipboard (same retry), `EmptyClipboard`, `CloseClipboard`. The caller then saves `ignore_seq`.
+
+### 7.4 Restore
 
 1. Open the clipboard (same retry), then `EmptyClipboard`.
 2. For each format:
@@ -228,6 +233,15 @@ Operations:
   2. Restore it to the clipboard.
   3. Move the item to position 0 (its time is unchanged). Drop a large payload again.
   4. Save the index.
+- **Delete** (`delete(i)`, Win+B, i = sel):
+  1. Remove item `i`.
+  2. If `i == 0`, the deleted item was the clipboard content:
+     - if items remain, restore the new item 0 (payload from RAM or disk; an unreadable item is dropped and the next one is tried);
+     - if none remain, empty the clipboard (`clip::clear`).
+     
+     Either way, save `ignore_seq`.
+  3. If `i > 0`, the clipboard is not touched.
+  4. Set `sel = min(sel, len−1)` (0 if empty) and save the index. The writer then deletes the item's file.
 - **Clear**: empty the list, save an empty index.
 - **Apply settings** (`apply_settings(width, side, max_items)`):
   1. Update the config.
@@ -239,6 +253,7 @@ Selection and scrolling:
 - **SHOW**: if hidden, sel = 0 and scroll = 0.
 - **PREV**: sel+1, limited to len−1. **NEXT**: sel−1, limited to 0. After either: `scroll = keep_visible(sel, scroll, LIST_ROWS)`.
 - **COMMIT**: if `0 < sel < len`, select the item; then sel = 0. **CANCEL**: hide, sel = 0.
+- **DELETE**: show if hidden, `delete(sel)`, then `keep_visible`, repaint.
 - `keep_visible(sel, scroll, rows)` moves the window as little as possible:
   - `sel < scroll` → `sel`;
   - `sel ≥ scroll+rows` → `sel+1−rows`;
@@ -425,7 +440,7 @@ Opened from tray **Settings…** or by a second launch (`WM_APP_SETTINGS`). Only
 
 ## 15. Tray (`tray.rs`)
 
-- `Shell_NotifyIconW(NIM_ADD)`: uID 1, callback `WM_APP_TRAY`, tooltip `Unshufflz (hold Win, V = back, C = forward)`.
+- `Shell_NotifyIconW(NIM_ADD)`: uID 1, callback `WM_APP_TRAY`, tooltip `Unshufflz (hold Win: V back, C forward, B delete)`.
 - Icon: drawn in code at `SM_CXSMICON` size; ARGB DIB + 1-bit mask → `CreateIconIndirect`. Shapes, as fractions of the size (x0, y0, x1, y1), checked in this order:
   - clip `#505050`: 0.34, 0.03, 0.66, 0.20
   - paper `#FFFFFF`: 0.25, 0.25, 0.75, 0.86
@@ -536,11 +551,11 @@ Errors show "Setup failed: …" (unless silent) and set exit code 1. User data i
 
 ## 18. Tests
 
-`cargo test --release` (app, 32 tests):
+`cargo test --release` (app, 33 tests):
 
 | Module | Tests |
 |---|---|
-| hook | quick tap; hold → SHOW, release → COMMIT + inject; V/C navigation and swallowing; Win+E passthrough; other key while shown → CANCEL; modifiers; Esc cancel + mask; Esc before overlay; C/V without Win |
+| hook | quick tap; hold → SHOW, release → COMMIT + inject; V/C navigation and swallowing; B → SHOW + DELETE, swallowed, Start menu masked; Win+E passthrough; other key while shown → CANCEL; modifiers; Esc cancel + mask; Esc before overlay; C/V without Win |
 | store | item round trip; bit flip / truncation / empty rejected; index round trip + cleanup; broken index → scan; writer thread + double shutdown; **1000 items with a limit of 10 → exactly 10 item files + index on disk, newest 10 loaded in order** |
 | preview | DROPFILES parsing; text / RTF / files / image previews; thumbnail scaling; small image not enlarged; bad DIBs rejected |
 | history | duplicate key with extra formats; registered formats hashed by name; different text; `keep_visible` scrolling |
@@ -554,6 +569,7 @@ Manual checks done:
 - saving and reloading after restart;
 - memory: about 1.7 MB private when empty, about 1.9 MB with 10 items;
 - simulated Win hold + V presses: overlay shown, clipboard went back 2 items;
+- Win+B (simulated): clipboard went from "del B" back to "del A", and the item was removed from the index;
 - settings window: opened by a second launch; screenshot checked (themed controls); OK wrote `WidthPercent=20`, `Position=left`, `MaxItems=25` to the INI, and the values were set back afterwards.
 
 Not yet checked by hand:
@@ -565,7 +581,7 @@ Not yet checked by hand:
 
 ## 19. Known limits
 
-- Win+V / Win+C system shortcuts are replaced while Win is held.
+- Win+V / Win+C / Win+B system shortcuts are replaced while Win is held.
 - Admin windows give no keys to the hook unless the app runs as admin.
 - Stored data is not encrypted.
 - File items store paths only.

@@ -1,7 +1,7 @@
 use crate::clip::{self, Payload};
 use crate::config::{self, Config, Side};
 use crate::history::{self, Item, RAM_LIMIT};
-use crate::hook::{self, A_CANCEL, A_COMMIT, A_NEXT, A_PREV, A_SHOW, WM_APP_HOOK};
+use crate::hook::{self, A_CANCEL, A_COMMIT, A_DELETE, A_NEXT, A_PREV, A_SHOW, WM_APP_HOOK};
 use crate::paint::{self, Fonts};
 use crate::preview::{self, Kind};
 use crate::settings;
@@ -218,24 +218,35 @@ impl App {
                 self.hide();
                 self.sel = 0;
             }
+            A_DELETE => {
+                self.show();
+                self.delete(self.sel);
+                self.scroll = history::keep_visible(self.sel, self.scroll, paint::LIST_ROWS);
+                self.invalidate();
+            }
             _ => {}
+        }
+    }
+
+    /// Payload of item `i` from RAM or disk. If it can't be read: beep and remove the item.
+    fn payload(&mut self, i: usize) -> Option<Arc<Payload>> {
+        if let Some(p) = &self.items[i].payload {
+            return Some(p.clone());
+        }
+        match store::read_item(&self.dir, self.items[i].id) {
+            Some(p) => Some(Arc::new(p)),
+            None => {
+                unsafe { MessageBeep(MB_ICONWARNING) };
+                self.items.remove(i);
+                self.save_index();
+                None
+            }
         }
     }
 
     /// Put item `i` on the clipboard and move it to the top.
     fn select(&mut self, i: usize) {
-        let payload = match &self.items[i].payload {
-            Some(p) => p.clone(),
-            None => match store::read_item(&self.dir, self.items[i].id) {
-                Some(p) => Arc::new(p),
-                None => {
-                    unsafe { MessageBeep(MB_ICONWARNING) };
-                    self.items.remove(i);
-                    self.save_index();
-                    return;
-                }
-            },
-        };
+        let Some(payload) = self.payload(i) else { return };
         if clip::restore(self.hwnd, &payload) {
             self.ignore_seq = unsafe { GetClipboardSequenceNumber() };
         }
@@ -244,6 +255,34 @@ impl App {
             it.payload = None;
         }
         self.items.insert(0, it);
+        self.save_index();
+    }
+
+    /// Win+B: delete item `i` from history (and disk). If it was the clipboard content
+    /// (i == 0), the next older item goes on the clipboard, or the clipboard is emptied.
+    fn delete(&mut self, i: usize) {
+        if i >= self.items.len() {
+            return;
+        }
+        self.items.remove(i);
+        if i == 0 {
+            loop {
+                if self.items.is_empty() {
+                    if clip::clear(self.hwnd) {
+                        self.ignore_seq = unsafe { GetClipboardSequenceNumber() };
+                    }
+                    break;
+                }
+                // payload() drops unreadable items, so try the next one then.
+                if let Some(p) = self.payload(0) {
+                    if clip::restore(self.hwnd, &p) {
+                        self.ignore_seq = unsafe { GetClipboardSequenceNumber() };
+                    }
+                    break;
+                }
+            }
+        }
+        self.sel = self.sel.min(self.items.len().saturating_sub(1));
         self.save_index();
     }
 

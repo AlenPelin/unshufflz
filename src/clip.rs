@@ -195,6 +195,18 @@ fn owner_name() -> String {
     }
 }
 
+/// Empty the clipboard. Returns true on success.
+pub fn clear(hwnd: HWND) -> bool {
+    if !open(hwnd) {
+        return false;
+    }
+    unsafe {
+        EmptyClipboard();
+        CloseClipboard();
+    }
+    true
+}
+
 /// Put a stored payload back on the clipboard. Returns true on success.
 pub fn restore(hwnd: HWND, p: &Payload) -> bool {
     if !open(hwnd) {

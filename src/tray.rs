@@ -28,7 +28,7 @@ pub fn add(hwnd: HWND) {
     d.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     d.uCallbackMessage = WM_APP_TRAY;
     d.hIcon = make_icon();
-    for (i, c) in "Unshufflz (hold Win, V = back, C = forward)".encode_utf16().take(127).enumerate() {
+    for (i, c) in "Unshufflz (hold Win: V back, C forward, B delete)".encode_utf16().take(127).enumerate() {
         d.szTip[i] = c;
     }
     unsafe { Shell_NotifyIconW(NIM_ADD, &d) };

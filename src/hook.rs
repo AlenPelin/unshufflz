@@ -18,6 +18,7 @@ pub const A_PREV: usize = 2;
 pub const A_NEXT: usize = 3;
 pub const A_COMMIT: usize = 4;
 pub const A_CANCEL: usize = 5;
+pub const A_DELETE: usize = 6;
 
 /// dwExtraInfo of our injected keys, so the hook ignores them.
 const MARK: usize = 0x434C_4950;
@@ -28,6 +29,7 @@ const VK_LWIN_: u32 = 0x5B;
 const VK_RWIN_: u32 = 0x5C;
 const VK_C: u32 = 0x43;
 const VK_V: u32 = 0x56;
+const VK_B: u32 = 0x42;
 const VK_ESC: u32 = 0x1B;
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -99,7 +101,7 @@ pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
     if is_win(vk) || is_modifier(vk) || s.phase == Phase::Passthrough {
         return o;
     }
-    if vk == VK_C || vk == VK_V {
+    if vk == VK_C || vk == VK_V || vk == VK_B {
         o.swallow = true;
         if down {
             if s.phase != Phase::Shown {
@@ -107,7 +109,11 @@ pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
                 s.phase = Phase::Shown;
                 o.posts.push(A_SHOW);
             }
-            o.posts.push(if vk == VK_V { A_PREV } else { A_NEXT });
+            o.posts.push(match vk {
+                VK_V => A_PREV,
+                VK_C => A_NEXT,
+                _ => A_DELETE,
+            });
         }
         return o;
     }
@@ -277,6 +283,20 @@ mod tests {
         let o = step(&mut s, VK_RWIN_, false);
         assert_eq!(o.posts, vec![A_COMMIT]);
         assert!(o.inject);
+    }
+
+    #[test]
+    fn b_deletes_and_swallows() {
+        let mut s = st();
+        step(&mut s, VK_LWIN_, true);
+        let o = step(&mut s, VK_B, true);
+        assert_eq!(o.posts, vec![A_SHOW, A_DELETE]);
+        assert!(o.swallow);
+        assert!(step(&mut s, VK_B, false).swallow);
+        assert_eq!(step(&mut s, VK_B, true).posts, vec![A_DELETE]);
+        let o = step(&mut s, VK_LWIN_, false);
+        assert_eq!(o.posts, vec![A_COMMIT]);
+        assert!(o.swallow && o.inject); // Start menu stays closed
     }
 
     #[test]

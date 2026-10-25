@@ -50,6 +50,7 @@ The app runs in the background and adds a tray icon.
 | Hold **Win** (250 ms) | Overlay appears with the current clipboard item |
 | Hold Win + **V** | Go 1 step back in history (older item) |
 | Hold Win + **C** | Go 1 step forward in history (newer item) |
+| Hold Win + **B** | Delete the highlighted item from history (and disk). If it was the current clipboard item, the next older item goes on the clipboard right away (or the clipboard is emptied if nothing is left). Press B again to delete more. |
 | Release **Win** | The selected item becomes the clipboard content and moves to the top of the list. If you did not move, the clipboard stays as it is. Nothing is pasted automatically, so press Ctrl+V yourself. |
 | Hold Win + **Esc** | Close the overlay without changing anything |
 | Hold Win + other key (Win+E, Win+D, …) | Overlay closes and the normal Windows shortcut runs |
@@ -69,6 +70,8 @@ Tray icon menu (right click):
 - **Clear history**: deletes all stored items from memory and disk.
 - **Start with Windows**: on/off.
 - **Exit**.
+
+Tip: to paste a stack of copied items, paste with Ctrl+V and then press Win+B. The pasted item is dropped and the previous one is ready for the next Ctrl+V.
 
 Starting `unshufflz.exe` again (e.g. from the Start menu) while it is running opens the settings window.
 
@@ -109,7 +112,7 @@ Files are written safely: a crash or power cut never leaves a broken file.
 
 ## Limitations
 
-- While Win is held, **C** and **V** belong to Unshufflz. This blocks the built-in Win+V (Windows clipboard history) and Win+C (Copilot).
+- While Win is held, **C**, **V** and **B** belong to Unshufflz. This blocks the built-in Win+V (Windows clipboard history), Win+C (Copilot) and Win+B (focus the tray icons).
 - Windows does not pass keys from admin (elevated) windows to normal apps. To use the overlay over admin windows, run Unshufflz as admin.
 - Content marked private by password managers is not stored. Windows marks it with `ExcludeClipboardContentFromMonitorProcessing` or `CanIncludeInClipboardHistory=0`.
 - File items store the file paths, not the file contents. Pasting them later needs the files to still exist.
