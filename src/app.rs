@@ -1,7 +1,8 @@
 use crate::clip::{self, Payload};
 use crate::config::{self, Config, Side};
 use crate::history::{self, Item, RAM_LIMIT};
-use crate::hook::{self, A_CANCEL, A_COMMIT, A_DELETE, A_NEXT, A_PREV, A_SHOW, WM_APP_HOOK};
+use crate::hook::{self, A_CANCEL, A_COMMIT, A_DELETE, A_NEXT, A_PREV, A_SAVE, A_SHOW, WM_APP_HOOK};
+use crate::imagesave;
 use crate::paint::{self, Fonts};
 use crate::preview::{self, Kind};
 use crate::settings;
@@ -110,6 +111,7 @@ pub fn run(cfg: Config) {
             cfg,
         };
         app.load();
+        app.update_image_flag();
         app.on_clipboard(); // take what is on the clipboard now
         let hold = app.cfg.hold_ms;
         APP.with(|a| *a.borrow_mut() = Some(app));
@@ -177,9 +179,16 @@ impl App {
         self.invalidate();
     }
 
+    /// Called after every history change: persist the order and tell the hook
+    /// whether Win+S applies (current item is an image).
     fn save_index(&self) {
         let e = self.items.iter().map(|it| Entry { id: it.id, time: it.time, source: it.source.clone() }).collect();
         self.store.save_index(e);
+        self.update_image_flag();
+    }
+
+    fn update_image_flag(&self) {
+        hook::set_image_on_clipboard(self.items.first().is_some_and(|it| it.preview.kind == Kind::Image));
     }
 
     fn on_saved(&mut self, id: u64) {
@@ -217,6 +226,13 @@ impl App {
             A_CANCEL => {
                 self.hide();
                 self.sel = 0;
+            }
+            A_SAVE => {
+                self.show();
+                self.save_image();
+                self.sel = 0;
+                self.scroll = 0;
+                self.invalidate();
             }
             A_DELETE => {
                 self.show();
@@ -284,6 +300,29 @@ impl App {
         }
         self.sel = self.sel.min(self.items.len().saturating_sub(1));
         self.save_index();
+    }
+
+    /// Win+S: save the current (image) item to Pictures\Clipboard as PNG, replace it in
+    /// history with the saved file, and put that file on the clipboard (as Explorer's Copy).
+    fn save_image(&mut self) {
+        if self.items.first().is_none_or(|it| it.preview.kind != Kind::Image) {
+            return;
+        }
+        let Some(p) = self.payload(0) else { return };
+        let path = match imagesave::save_png(&p, &imagesave::pictures_dir().join("Clipboard")) {
+            Ok(path) => path,
+            Err(_) => {
+                unsafe { MessageBeep(MB_ICONWARNING) };
+                return;
+            }
+        };
+        self.items.remove(0);
+        self.add(imagesave::file_payload(&path), "unshufflz.exe".into());
+        if let Some(p) = self.items.first().and_then(|it| it.payload.clone()) {
+            if clip::restore(self.hwnd, &p) {
+                self.ignore_seq = unsafe { GetClipboardSequenceNumber() };
+            }
+        }
     }
 
     fn show(&mut self) {

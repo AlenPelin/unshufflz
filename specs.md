@@ -10,6 +10,7 @@ Current version: **0.2.0**. The version lives in the root `Cargo.toml`. The inst
 - Keep the last **N** clipboard items (default 10, settable 1–100) of any kind: text, rich text, images, files, app-specific formats.
 - Show them in an **overlay** on the right (or left) side of the screen while **Win** is held.
 - Win+V = 1 step back (older), Win+C = 1 step forward (newer). Releasing Win puts the selected item on the clipboard. There is no automatic paste.
+- Win+S = when the current item is an image: save it as PNG to `Pictures\Clipboard`, and replace it (history and clipboard) with the saved file.
 - Win+B = delete the highlighted item. Deleting the current clipboard item puts the next older one on the clipboard, so "Ctrl+V, Win+B" pastes copied items newest first.
 - At most 10 list rows are visible. Longer histories scroll with the selection, without a scrollbar.
 - A **settings window** from the tray: width, side, history size.
@@ -26,10 +27,11 @@ Current version: **0.2.0**. The version lives in the root `Cargo.toml`. The inst
 | COM (installer only) | `windows` = **0.58.0** (pinned), for `IShellLinkW` / `IPersistFile` |
 | Drawing | GDI (no Direct2D, no UI framework) |
 | Hashing | `xxhash-rust` 0.8, feature `xxh3` (`xxh3_64`, streaming `Xxh3`) |
+| PNG encoding | `png` 0.17 (pure Rust) |
 | Release profile (workspace root) | `opt-level=3`, `lto=true`, `codegen-units=1`, `panic="abort"`, `strip=true` |
 | Subsystem | `#![windows_subsystem = "windows"]` (no console), for both exes |
 
-App `windows-sys` features: `Win32_Foundation`, `Win32_Security`, `Win32_Graphics_Gdi`, `Win32_Storage_FileSystem`, `Win32_System_DataExchange`, `Win32_System_Diagnostics_Debug`, `Win32_System_LibraryLoader`, `Win32_System_Memory`, `Win32_System_Registry`, `Win32_System_SystemInformation`, `Win32_System_Threading`, `Win32_System_Time`, `Win32_UI_Controls`, `Win32_UI_HiDpi`, `Win32_UI_Input_KeyboardAndMouse`, `Win32_UI_Shell`, `Win32_UI_WindowsAndMessaging`.
+App `windows-sys` features: `Win32_Foundation`, `Win32_Security`, `Win32_Graphics_Gdi`, `Win32_Storage_FileSystem`, `Win32_System_Com`, `Win32_System_DataExchange`, `Win32_System_Diagnostics_Debug`, `Win32_System_LibraryLoader`, `Win32_System_Memory`, `Win32_System_Registry`, `Win32_System_SystemInformation`, `Win32_System_Threading`, `Win32_System_Time`, `Win32_UI_Controls`, `Win32_UI_HiDpi`, `Win32_UI_Input_KeyboardAndMouse`, `Win32_UI_Shell`, `Win32_UI_WindowsAndMessaging`.
 
 Installer features:
 - `windows-sys`: `Win32_Foundation`, `Win32_System_Registry`, `Win32_System_Threading`, `Win32_UI_WindowsAndMessaging`.
@@ -56,6 +58,7 @@ Installer features:
 | `src/hook.rs` | Keyboard hook thread; pure state machine `step()` / `on_hold()` |
 | `src/clip.rs` | Clipboard capture / restore, `Fmt` / `Payload`, format constants |
 | `src/history.rs` | `Item`, `full_hash`, `content_key`, `keep_visible`, `payload_size`, `RAM_LIMIT` |
+| `src/imagesave.rs` | Win+S: DIB parsing / conversion to RGBA, PNG encoding, file naming, Pictures folder, "copied file" payload |
 | `src/preview.rs` | `Preview` / `Kind` / `Thumb`; preview building; DROPFILES parsing; DIB thumbnails |
 | `src/paint.rs` | `Fonts`, `LIST_ROWS`; drawing the overlay |
 | `src/settings.rs` | Settings window |
@@ -103,7 +106,7 @@ Shutdown:
 
 | Message | Value | From → to | wParam / lParam |
 |---|---|---|---|
-| `WM_APP_HOOK` | `WM_APP+1` | hook → main | wParam = action (1 SHOW, 2 PREV, 3 NEXT, 4 COMMIT, 5 CANCEL, 6 DELETE) |
+| `WM_APP_HOOK` | `WM_APP+1` | hook → main | wParam = action (1 SHOW, 2 PREV, 3 NEXT, 4 COMMIT, 5 CANCEL, 6 DELETE, 7 SAVE) |
 | `WM_APP_SAVED` | `WM_APP+2` | writer → main | lParam = item id |
 | `WM_APP_TRAY` | `WM_APP+3` | shell → main | lParam low word = mouse message |
 | `WM_APP_SETTINGS` | `WM_APP+4` | second instance → main | open the settings window |
@@ -124,8 +127,8 @@ App state lives in a thread-local `RefCell<Option<App>>`. Handlers use `try_borr
 | Name | Value |
 |---|---|
 | VK_LWIN / VK_RWIN | 0x5B / 0x5C |
-| C / V / B / Esc | 0x43 / 0x56 / 0x42 / 0x1B |
-| Modifiers (ignored) | 0x10–0x12, 0xA0–0xA5 |
+| C / V / B / S / Esc | 0x43 / 0x56 / 0x42 / 0x53 / 0x1B |
+| Modifiers (passed through, tracked) | Shift 0x10/0xA0/0xA1 = bit 1, Ctrl 0x11/0xA2/0xA3 = bit 2, Alt 0x12/0xA4/0xA5 = bit 4 |
 | Mask key | 0xE8 |
 | Injection marker (`dwExtraInfo`) | 0x434C4950 |
 | Hold delay | `HoldDelayMs` (default 250 ms) |
@@ -138,7 +141,9 @@ App state lives in a thread-local `RefCell<Option<App>>`. Handlers use `try_borr
 
 ### 6.3 State machine (pure, unit-tested)
 
-State: `phase` ∈ {Idle, Armed, Shown, Cancelled, Passthrough}, `win` = the Win VK that started the sequence.
+State: `phase` ∈ {Idle, Armed, Shown, Cancelled, Passthrough}; `win` = the Win VK that started the sequence; `mods` = bits of the modifiers held now; `image` = whether the current clipboard item is an image.
+- `image` is copied from a global `AtomicBool` before each event. The main thread sets it with `hook::set_image_on_clipboard` after every history change (in `save_index`) and after loading.
+- Before any rule, `mods` is updated: a modifier down sets its bit, up clears it (in every phase).
 Output: `swallow`, `inject`, `posts[]`, `start_timer`, `stop_timer`.
 
 Rules for `step(vk, down)`, checked in this order:
@@ -150,7 +155,7 @@ Rules for `step(vk, down)`, checked in this order:
      - from Cancelled → swallow, inject;
      - otherwise → pass.
 3. The other Win key, a modifier, or phase Passthrough → pass, no change.
-4. **C/V/B** (in Armed / Shown / Cancelled) → swallow both down and up. On down: if not Shown, then stop_timer, phase = Shown, post SHOW. Then post PREV (V), NEXT (C) or DELETE (B).
+4. **C/V/B**, and **S** when `image && mods == 0` (in Armed / Shown / Cancelled) → swallow both down and up. On down: if not Shown, then stop_timer, phase = Shown, post SHOW. Then post PREV (V), NEXT (C), DELETE (B) or SAVE (S). Otherwise S falls to rule 6 (normal Windows shortcut).
 5. **Esc** in Shown or Cancelled → swallow. On down in Shown → Cancelled, post CANCEL.
 6. **Any other key**: on down, post CANCEL if Shown, stop_timer, phase = Passthrough. The key passes.
 
@@ -163,7 +168,7 @@ The real Win up is swallowed. `SendInput` then sends, all with the marker:
 2. 0xE8 up
 3. Win up (`KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY`)
 
-Windows sees a key between Win down and Win up, so the Start menu stays closed. C/V/B never reach Windows.
+Windows sees a key between Win down and Win up, so the Start menu stays closed. C/V/B (and S, when taken) never reach Windows.
 
 ## 7. Clipboard (`clip.rs`)
 
@@ -242,6 +247,12 @@ Operations:
      Either way, save `ignore_seq`.
   3. If `i > 0`, the clipboard is not touched.
   4. Set `sel = min(sel, len−1)` (0 if empty) and save the index. The writer then deletes the item's file.
+- **Save image** (`save_image`, Win+S):
+  1. Only if item 0 is of kind Image; get its payload (RAM or disk).
+  2. `imagesave::save_png(payload, Pictures\Clipboard)`. On failure: `MessageBeep(MB_ICONWARNING)`, nothing else changes.
+  3. Remove item 0 (its file is deleted by the next cleanup).
+  4. `add(file_payload(path), "unshufflz.exe")`.
+  5. Restore the new item 0 to the clipboard and save `ignore_seq`.
 - **Clear**: empty the list, save an empty index.
 - **Apply settings** (`apply_settings(width, side, max_items)`):
   1. Update the config.
@@ -254,6 +265,7 @@ Selection and scrolling:
 - **PREV**: sel+1, limited to len−1. **NEXT**: sel−1, limited to 0. After either: `scroll = keep_visible(sel, scroll, LIST_ROWS)`.
 - **COMMIT**: if `0 < sel < len`, select the item; then sel = 0. **CANCEL**: hide, sel = 0.
 - **DELETE**: show if hidden, `delete(sel)`, then `keep_visible`, repaint.
+- **SAVE**: show if hidden, `save_image()`, sel = 0, scroll = 0, repaint.
 - `keep_visible(sel, scroll, rows)` moves the window as little as possible:
   - `sel < scroll` → `sel`;
   - `sel ≥ scroll+rows` → `sel+1−rows`;
@@ -385,6 +397,33 @@ Order of checks:
 
 `human_size` (1024-based): `N B`, `x.x KB`, `x.x MB`, `x.xx GB`.
 
+## 12a. Saving images (`imagesave.rs`, Win+S)
+
+**Folder**:
+- `SHGetKnownFolderPath(FOLDERID_Pictures)` (follows OneDrive / folder redirection; the string is freed with `CoTaskMemFree`), plus `Clipboard`.
+- Fallback: `%USERPROFILE%\Pictures\Clipboard`.
+- The folder is created when needed.
+
+**File name**: `Unshufflz_yyyyMMdd_HHmmss.png` in local time (`GetLocalTime`, 24-hour clock).
+- The file is opened with `create_new`, so an existing file is never overwritten. If the name is taken, `_2`, `_3`, … up to 999 is added.
+- The data is written through a `BufWriter`, then `sync_all`. On error the partial file is deleted.
+
+**Content**:
+1. If a registered format named `PNG` (any case) exists, its bytes are written unchanged.
+2. Otherwise CF_DIBV5 (else CF_DIB) is converted to top-down RGBA (`dib_to_rgba`):
+   - `dib_info` parses the header. The pixel data offset is computed as in section 12. The pixel data must fit in the buffer, and compression must be BI_RGB or BI_BITFIELDS.
+   - **32-bit**, with BI_RGB or BI_BITFIELDS using the standard masks R=0x00FF0000, G=0x0000FF00, B=0x000000FF: read directly, BGRA → RGBA. If every alpha byte is 0, all alpha is set to 255 (apps often leave alpha 0 for opaque images); otherwise alpha is kept.
+   - **24-bit** BI_RGB: read directly, alpha 255.
+   - **Anything else** (1/4/8-bit palette, 16-bit, other masks): `StretchDIBits` 1:1 (COLORONCOLOR) into a 32-bit top-down DIB section, `GdiFlush`, then read BGRX, alpha 255.
+   - Bottom-up rows (height > 0) are flipped.
+3. PNG encoding (`encode_png`, `png` crate, 8-bit, default compression): RGB if all pixels are opaque (smaller file), else RGBA.
+
+**Clipboard payload for the saved file** (`file_payload`), the same as Explorer's Copy:
+- `CF_HDROP`: a DROPFILES header (20 bytes, `pFiles = 20`, `fWide = 1`), then the UTF-16 path and two NULs.
+- Registered format `Preferred DropEffect`: DWORD 1 (DROPEFFECT_COPY).
+
+Measured: a 1920×1080 image saved in about 240 ms (697 KB PNG).
+
 ## 13. Config (`config.rs`)
 
 File: `%LOCALAPPDATA%\Unshufflz\unshufflz.ini`. It is read once at start and written by the settings window (OK).
@@ -440,7 +479,7 @@ Opened from tray **Settings…** or by a second launch (`WM_APP_SETTINGS`). Only
 
 ## 15. Tray (`tray.rs`)
 
-- `Shell_NotifyIconW(NIM_ADD)`: uID 1, callback `WM_APP_TRAY`, tooltip `Unshufflz (hold Win: V back, C forward, B delete)`.
+- `Shell_NotifyIconW(NIM_ADD)`: uID 1, callback `WM_APP_TRAY`, tooltip `Unshufflz (hold Win: V back, C forward, B delete, S save image)`.
 - Icon: drawn in code at `SM_CXSMICON` size; ARGB DIB + 1-bit mask → `CreateIconIndirect`. Shapes, as fractions of the size (x0, y0, x1, y1), checked in this order:
   - clip `#505050`: 0.34, 0.03, 0.66, 0.20
   - paper `#FFFFFF`: 0.25, 0.25, 0.75, 0.86
@@ -551,15 +590,16 @@ Errors show "Setup failed: …" (unless silent) and set exit code 1. User data i
 
 ## 18. Tests
 
-`cargo test --release` (app, 33 tests):
+`cargo test --release` (app, 41 tests):
 
 | Module | Tests |
 |---|---|
-| hook | quick tap; hold → SHOW, release → COMMIT + inject; V/C navigation and swallowing; B → SHOW + DELETE, swallowed, Start menu masked; Win+E passthrough; other key while shown → CANCEL; modifiers; Esc cancel + mask; Esc before overlay; C/V without Win |
+| hook | quick tap; hold → SHOW, release → COMMIT + inject; V/C navigation and swallowing; B → SHOW + DELETE, swallowed, Start menu masked; S taken only with an image and no modifiers (Win+S Search and Win+Shift+S pass); Win+E passthrough; other key while shown → CANCEL; modifiers; Esc cancel + mask; Esc before overlay; C/V without Win |
 | store | item round trip; bit flip / truncation / empty rejected; index round trip + cleanup; broken index → scan; writer thread + double shutdown; **1000 items with a limit of 10 → exactly 10 item files + index on disk, newest 10 loaded in order** |
 | preview | DROPFILES parsing; text / RTF / files / image previews; thumbnail scaling; small image not enlarged; bad DIBs rejected |
 | history | duplicate key with extra formats; registered formats hashed by name; different text; `keep_visible` scrolling |
 | config | defaults and overrides incl. Position and MaxItems; clamping; format → parse round trip |
+| imagesave | 24-bit bottom-up conversion; 32-bit alpha rules (all-zero → opaque, real alpha kept); 8-bit palette through GDI; broken / compressed DIBs rejected; PNG round trip (RGBA, and RGB when opaque); file names incl. `_2`; saving twice in one second makes two files; a `PNG` format is written as-is; file payload parses back to the path |
 | util | sizes; UTF-16 helpers; time format |
 
 `cargo test --release -p unshufflz-setup` (4 tests): argument parsing; install paths; path comparison helpers; the embedded app starts with `MZ`.
@@ -569,6 +609,7 @@ Manual checks done:
 - saving and reloading after restart;
 - memory: about 1.7 MB private when empty, about 1.9 MB with 10 items;
 - simulated Win hold + V presses: overlay shown, clipboard went back 2 items;
+- Win+S (simulated) with a 1920×1080 image: PNG saved to `OneDrive\Pictures\Clipboard`, 1920×1080, about 240 ms; clipboard afterwards held the file (file-drop list) and no image. The test file was deleted.
 - Win+B (simulated): clipboard went from "del B" back to "del A", and the item was removed from the index;
 - settings window: opened by a second launch; screenshot checked (themed controls); OK wrote `WidthPercent=20`, `Position=left`, `MaxItems=25` to the INI, and the values were set back afterwards.
 
@@ -581,7 +622,8 @@ Not yet checked by hand:
 
 ## 19. Known limits
 
-- Win+V / Win+C / Win+B system shortcuts are replaced while Win is held.
+- Win+V / Win+C / Win+B system shortcuts are replaced while Win is held; Win+S (Search) only while the current item is an image.
+- Win+S works on the current clipboard item only, not on the item highlighted in the overlay.
 - Admin windows give no keys to the hook unless the app runs as admin.
 - Stored data is not encrypted.
 - File items store paths only.

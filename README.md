@@ -4,7 +4,7 @@ A small clipboard history manager for Windows 10/11, similar to Clipboarder from
 It keeps your recent clipboard items (text, rich text, images, files and any other format).
 While you hold the Win key, it shows them in an overlay on the side of the screen.
 
-- A single 340 KB exe. It needs no runtime, browser engine or JavaScript.
+- A single 470 KB exe. It needs no runtime, browser engine or JavaScript.
 - It uses about 2 MB of private RAM, and 6 threads.
 - History is saved to disk and survives restarts and power loss.
 - You can change the history size (1–100 items), the overlay width and its side in a settings window.
@@ -52,6 +52,7 @@ The app runs in the background and adds a tray icon.
 | Hold Win + **C** | Go 1 step forward in history (newer item) |
 | Hold Win + **B** | Delete the highlighted item from history (and disk). If it was the current clipboard item, the next older item goes on the clipboard right away (or the clipboard is emptied if nothing is left). Press B again to delete more. |
 | Release **Win** | The selected item becomes the clipboard content and moves to the top of the list. If you did not move, the clipboard stays as it is. Nothing is pasted automatically, so press Ctrl+V yourself. |
+| Hold Win + **S** (current item is an image) | Save the image as PNG to `Pictures\Clipboard\Unshufflz_yyyyMMdd_HHmmss.png`. In history and on the clipboard, the image is replaced by the saved file, as if you had copied it in Explorer, so Ctrl+V pastes the file. If the current item is not an image, or Shift/Ctrl/Alt is held, Win+S does its normal Windows thing (Search; Win+Shift+S = snipping). |
 | Hold Win + **Esc** | Close the overlay without changing anything |
 | Hold Win + other key (Win+E, Win+D, …) | Overlay closes and the normal Windows shortcut runs |
 | Quick Win tap | Start menu opens as usual |
@@ -112,7 +113,8 @@ Files are written safely: a crash or power cut never leaves a broken file.
 
 ## Limitations
 
-- While Win is held, **C**, **V** and **B** belong to Unshufflz. This blocks the built-in Win+V (Windows clipboard history), Win+C (Copilot) and Win+B (focus the tray icons).
+- While Win is held, **C**, **V** and **B** belong to Unshufflz. This blocks the built-in Win+V (Windows clipboard history), Win+C (Copilot) and Win+B (focus the tray icons). **S** is taken only when the current item is an image and no Shift/Ctrl/Alt is held, which blocks Windows Search in that case only.
+- Win+S saves only the current clipboard item, not an older item you moved to in the overlay.
 - Windows does not pass keys from admin (elevated) windows to normal apps. To use the overlay over admin windows, run Unshufflz as admin.
 - Content marked private by password managers is not stored. Windows marks it with `ExcludeClipboardContentFromMonitorProcessing` or `CanIncludeInClipboardHistory=0`.
 - File items store the file paths, not the file contents. Pasting them later needs the files to still exist.

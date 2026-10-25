@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
@@ -19,6 +19,7 @@ pub const A_NEXT: usize = 3;
 pub const A_COMMIT: usize = 4;
 pub const A_CANCEL: usize = 5;
 pub const A_DELETE: usize = 6;
+pub const A_SAVE: usize = 7;
 
 /// dwExtraInfo of our injected keys, so the hook ignores them.
 const MARK: usize = 0x434C_4950;
@@ -30,6 +31,7 @@ const VK_RWIN_: u32 = 0x5C;
 const VK_C: u32 = 0x43;
 const VK_V: u32 = 0x56;
 const VK_B: u32 = 0x42;
+const VK_S: u32 = 0x53;
 const VK_ESC: u32 = 0x1B;
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -48,6 +50,16 @@ pub enum Phase {
 pub struct St {
     pub phase: Phase,
     pub win: u32,
+    /// Held modifiers: 1 Shift, 2 Ctrl, 4 Alt.
+    pub mods: u8,
+    /// The current clipboard item is an image (Win+S is only taken then).
+    pub image: bool,
+}
+
+impl St {
+    pub const fn new() -> St {
+        St { phase: Phase::Idle, win: 0, mods: 0, image: false }
+    }
 }
 
 #[derive(Default, Debug, PartialEq)]
@@ -65,12 +77,27 @@ fn is_win(vk: u32) -> bool {
 }
 
 fn is_modifier(vk: u32) -> bool {
-    matches!(vk, 0x10..=0x12 | 0xA0..=0xA5)
+    modifier_bit(vk) != 0
+}
+
+fn modifier_bit(vk: u32) -> u8 {
+    match vk {
+        0x10 | 0xA0 | 0xA1 => 1,
+        0x11 | 0xA2 | 0xA3 => 2,
+        0x12 | 0xA4 | 0xA5 => 4,
+        _ => 0,
+    }
 }
 
 /// One key event → what to do.
 pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
     let mut o = Out::default();
+    let bit = modifier_bit(vk);
+    if down {
+        s.mods |= bit;
+    } else {
+        s.mods &= !bit;
+    }
     if s.phase == Phase::Idle {
         if down && is_win(vk) {
             s.phase = Phase::Armed;
@@ -101,7 +128,10 @@ pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
     if is_win(vk) || is_modifier(vk) || s.phase == Phase::Passthrough {
         return o;
     }
-    if vk == VK_C || vk == VK_V || vk == VK_B {
+    // Win+S only when an image is on the clipboard and no modifier is held,
+    // so Windows Search and Win+Shift+S (snipping) keep working otherwise.
+    let save = vk == VK_S && s.image && s.mods == 0;
+    if vk == VK_C || vk == VK_V || vk == VK_B || save {
         o.swallow = true;
         if down {
             if s.phase != Phase::Shown {
@@ -112,7 +142,8 @@ pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
             o.posts.push(match vk {
                 VK_V => A_PREV,
                 VK_C => A_NEXT,
-                _ => A_DELETE,
+                VK_B => A_DELETE,
+                _ => A_SAVE,
             });
         }
         return o;
@@ -145,10 +176,16 @@ pub fn on_hold(s: &mut St) -> Option<usize> {
 }
 
 static MAIN: AtomicIsize = AtomicIsize::new(0);
+static IMAGE: AtomicBool = AtomicBool::new(false);
+
+/// Called by the main thread whenever the current clipboard item changes.
+pub fn set_image_on_clipboard(on: bool) {
+    IMAGE.store(on, Ordering::Relaxed);
+}
 static HOLD_MS: AtomicU32 = AtomicU32::new(250);
 
 thread_local! {
-    static ST: RefCell<St> = const { RefCell::new(St { phase: Phase::Idle, win: 0 }) };
+    static ST: RefCell<St> = const { RefCell::new(St::new()) };
     static TIMER: RefCell<usize> = const { RefCell::new(0) };
 }
 
@@ -204,6 +241,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             let down = m == WM_KEYDOWN || m == WM_SYSKEYDOWN;
             let (o, win) = ST.with(|s| {
                 let mut s = s.borrow_mut();
+                s.image = IMAGE.load(Ordering::Relaxed);
                 let win = s.win;
                 (step(&mut s, k.vkCode, down), win)
             });
@@ -241,7 +279,35 @@ mod tests {
     use super::*;
 
     fn st() -> St {
-        St { phase: Phase::Idle, win: 0 }
+        St::new()
+    }
+
+    #[test]
+    fn s_saves_only_image_without_modifiers() {
+        // no image: Win+S passes (Windows Search)
+        let mut s = st();
+        step(&mut s, VK_LWIN_, true);
+        let o = step(&mut s, VK_S, true);
+        assert!(!o.swallow && o.posts.is_empty());
+        assert_eq!(s.phase, Phase::Passthrough);
+        step(&mut s, VK_LWIN_, false);
+        // image: Win+S is ours
+        s.image = true;
+        step(&mut s, VK_LWIN_, true);
+        let o = step(&mut s, VK_S, true);
+        assert_eq!(o.posts, vec![A_SHOW, A_SAVE]);
+        assert!(o.swallow);
+        assert!(step(&mut s, VK_S, false).swallow);
+        assert_eq!(step(&mut s, VK_LWIN_, false).posts, vec![A_COMMIT]);
+        // image + Shift: Win+Shift+S passes (snipping tool)
+        step(&mut s, 0xA0, true);
+        step(&mut s, VK_LWIN_, true);
+        let o = step(&mut s, VK_S, true);
+        assert!(!o.swallow && o.posts.is_empty());
+        step(&mut s, VK_S, false);
+        step(&mut s, VK_LWIN_, false);
+        step(&mut s, 0xA0, false);
+        assert_eq!(s.mods, 0);
     }
 
     #[test]

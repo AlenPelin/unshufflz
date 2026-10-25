@@ -5,6 +5,7 @@ mod clip;
 mod config;
 mod history;
 mod hook;
+mod imagesave;
 mod paint;
 mod preview;
 mod settings;
