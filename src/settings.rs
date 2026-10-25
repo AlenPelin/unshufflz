@@ -1,5 +1,5 @@
 //! Settings window (tray → Settings…): overlay width, history size, show delay,
-//! folder for saved pictures, left/right placement.
+//! show with Start menu, folder for saved pictures, left/right placement.
 //! Plain Win32 controls; themed via the Common Controls v6 manifest.
 
 use crate::app;
@@ -24,6 +24,7 @@ const ID_COUNT: usize = 103;
 const ID_DELAY: usize = 104;
 const ID_PICS: usize = 105;
 const ID_BROWSE: usize = 106;
+const ID_START: usize = 107;
 
 const TBM_GETPOS: u32 = WM_USER;
 const TBM_SETPOS: u32 = WM_USER + 5;
@@ -35,6 +36,7 @@ const TBS_AUTOTICKS: u32 = 1;
 const BS_PUSHBUTTON_: u32 = 0;
 const BS_DEFPUSHBUTTON_: u32 = 1;
 const BS_AUTORADIOBUTTON_: u32 = 9;
+const BS_AUTOCHECKBOX_: u32 = 3;
 const SS_RIGHT_: u32 = 2;
 const ES_NUMBER_: u32 = 0x2000;
 const ES_RIGHT_: u32 = 2;
@@ -53,6 +55,7 @@ struct Ui {
     count: HWND,
     delay: HWND,
     pics: HWND,
+    start: HWND,
     font: HFONT,
     /// Config the window was opened with; OK changes only the fields shown here.
     base: Config,
@@ -97,7 +100,7 @@ pub fn open(cfg: Config) {
         let s = |v: i32| v * dpi as i32 / 96;
 
         // Size and center on the monitor under the cursor.
-        let mut r = RECT { left: 0, top: 0, right: s(360), bottom: s(332) };
+        let mut r = RECT { left: 0, top: 0, right: s(360), bottom: s(362) };
         AdjustWindowRectExForDpi(&mut r, STYLE, 0, 0, dpi);
         let (ww, wh) = (r.right - r.left, r.bottom - r.top);
         let mut pt = std::mem::zeroed();
@@ -134,20 +137,24 @@ pub fn open(cfg: Config) {
         child("STATIC", "Show delay when holding Win (ms, 0-2000)", 0, 16, 122, 260, 20, 0);
         let delay = child("EDIT", &cfg.hold_ms.to_string(), WS_TABSTOP | ES_NUMBER_ | ES_RIGHT_, 284, 119, 60, 24, ID_DELAY);
         SendMessageW(delay, EM_SETLIMITTEXT_, 4, 0);
-        child("STATIC", "Save pictures (Win+S) to folder", 0, 16, 156, 328, 20, 0);
-        let pics = child("EDIT", &cfg.pictures_dir, WS_TABSTOP | ES_AUTOHSCROLL_, 16, 178, 240, 24, ID_PICS);
+        let start = child("BUTTON", "Also show while the Start menu is open", WS_TABSTOP | BS_AUTOCHECKBOX_, 16, 152, 328, 22, ID_START);
+        if cfg.show_with_start {
+            SendMessageW(start, BM_SETCHECK, BST_CHECKED_, 0);
+        }
+        child("STATIC", "Save pictures (Win+S) to folder", 0, 16, 186, 328, 20, 0);
+        let pics = child("EDIT", &cfg.pictures_dir, WS_TABSTOP | ES_AUTOHSCROLL_, 16, 208, 240, 24, ID_PICS);
         // Empty box = default folder, shown as a grey hint.
         let hint = wide(&imagesave::default_dir().to_string_lossy());
         SendMessageW(pics, EM_SETCUEBANNER_, 1, hint.as_ptr() as LPARAM);
-        child("BUTTON", "Browse…", WS_TABSTOP | BS_PUSHBUTTON_, 262, 177, 82, 26, ID_BROWSE);
-        child("STATIC", "Position", 0, 16, 212, 260, 20, 0);
-        let right = child("BUTTON", "Right side of the screen", WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON_, 24, 234, 300, 22, ID_RIGHT);
-        let left = child("BUTTON", "Left side of the screen", BS_AUTORADIOBUTTON_, 24, 258, 300, 22, ID_LEFT);
+        child("BUTTON", "Browse…", WS_TABSTOP | BS_PUSHBUTTON_, 262, 207, 82, 26, ID_BROWSE);
+        child("STATIC", "Position", 0, 16, 242, 260, 20, 0);
+        let right = child("BUTTON", "Right side of the screen", WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON_, 24, 264, 300, 22, ID_RIGHT);
+        let left = child("BUTTON", "Left side of the screen", BS_AUTORADIOBUTTON_, 24, 288, 300, 22, ID_LEFT);
         SendMessageW(if cfg.side == Side::Left { left } else { right }, BM_SETCHECK, BST_CHECKED_, 0);
-        child("BUTTON", "OK", WS_TABSTOP | WS_GROUP | BS_DEFPUSHBUTTON_, 168, 292, 84, 28, IDOK as usize);
-        child("BUTTON", "Cancel", WS_TABSTOP | BS_PUSHBUTTON_, 260, 292, 84, 28, IDCANCEL as usize);
+        child("BUTTON", "OK", WS_TABSTOP | WS_GROUP | BS_DEFPUSHBUTTON_, 168, 322, 84, 28, IDOK as usize);
+        child("BUTTON", "Cancel", WS_TABSTOP | BS_PUSHBUTTON_, 260, 322, 84, 28, IDCANCEL as usize);
 
-        let ui: &'static Ui = Box::leak(Box::new(Ui { hwnd, track, value, right, count, delay, pics, font, base: cfg }));
+        let ui: &'static Ui = Box::leak(Box::new(Ui { hwnd, track, value, right, count, delay, pics, start, font, base: cfg }));
         UI.with(|u| u.set(Some(ui)));
         update_value();
         ShowWindow(hwnd, SW_SHOW);
@@ -203,6 +210,7 @@ fn apply() -> bool {
         cfg.max_items = number(ui.count).unwrap_or(10).clamp(1, MAX_ITEMS_LIMIT as u32) as usize;
         cfg.hold_ms = number(ui.delay).unwrap_or(0).min(2000);
         cfg.pictures_dir = pictures_dir;
+        cfg.show_with_start = SendMessageW(ui.start, BM_GETCHECK, 0, 0) as usize == BST_CHECKED_;
         app::apply_settings(cfg);
     }
     true

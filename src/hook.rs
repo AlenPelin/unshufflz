@@ -20,6 +20,8 @@ pub const A_COMMIT: usize = 4;
 pub const A_CANCEL: usize = 5;
 pub const A_DELETE: usize = 6;
 pub const A_SAVE: usize = 7;
+/// Quick Win tap: the Start menu is about to open (or close).
+pub const A_TAP: usize = 8;
 
 /// dwExtraInfo of our injected keys, so the hook ignores them.
 const MARK: usize = 0x434C_4950;
@@ -34,6 +36,9 @@ const VK_B: u32 = 0x42;
 const VK_S: u32 = 0x53;
 /// Releasing Win sooner than this without pressing C/V/B/S counts as a tap: Start opens.
 pub const TAP_MS: u32 = 300;
+/// A Win down this long after the last Win event can't be key repeat (repeats come at
+/// least every ~1 s): the release was missed (lock screen, UAC, admin window), start over.
+pub const STALE_MS: u32 = 1500;
 const VK_ESC: u32 = 0x1B;
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -62,11 +67,13 @@ pub struct St {
     pub down_time: u32,
     /// C/V/B/S was pressed during this Win hold.
     pub acted: bool,
+    /// Time of the last event of the held Win key.
+    pub last_win: u32,
 }
 
 impl St {
     pub const fn new() -> St {
-        St { phase: Phase::Idle, win: 0, mods: 0, image: false, now: 0, down_time: 0, acted: false }
+        St { phase: Phase::Idle, win: 0, mods: 0, image: false, now: 0, down_time: 0, acted: false, last_win: 0 }
     }
 }
 
@@ -106,26 +113,32 @@ pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
     } else {
         s.mods &= !bit;
     }
+    if s.phase != Phase::Idle && down && vk == s.win && s.now.wrapping_sub(s.last_win) > STALE_MS {
+        s.phase = Phase::Idle; // missed Win up: treat this as a new press
+        o.stop_timer = true;
+    }
     if s.phase == Phase::Idle {
         if down && is_win(vk) {
             s.phase = Phase::Armed;
             s.win = vk;
             s.down_time = s.now;
+            s.last_win = s.now;
             s.acted = false;
             o.start_timer = true;
         }
         return o;
     }
     if vk == s.win {
+        s.last_win = s.now;
         if down {
             return o; // auto-repeat
         }
         o.stop_timer = true;
         match std::mem::replace(&mut s.phase, Phase::Idle) {
             // Quick tap with the overlay already up (short or zero hold delay):
-            // hide it and let Win up through, so Start opens as usual.
+            // let Win up through, so Start opens (or closes) as usual.
             Phase::Shown if !s.acted && s.now.wrapping_sub(s.down_time) < TAP_MS => {
-                o.posts.push(A_CANCEL);
+                o.posts.push(A_TAP);
             }
             Phase::Shown => {
                 o.posts.push(A_COMMIT);
@@ -265,7 +278,13 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 s.image = IMAGE.load(Ordering::Relaxed);
                 s.now = k.time;
                 let win = s.win;
-                (step(&mut s, k.vkCode, down), win)
+                let before = s.phase;
+                let o = step(&mut s, k.vkCode, down);
+                // Only keys that matter to us: never log normal typing.
+                if before != Phase::Idle || s.phase != Phase::Idle {
+                    crate::util::debug(|| format!("hook vk={:#x} {} event_time={} flags={:#x} {:?}->{:?} {:?}", k.vkCode, if down { "down" } else { "up" }, k.time, k.flags, before, s.phase, o));
+                }
+                (o, win)
             });
             if o.stop_timer {
                 set_timer(false);
@@ -372,7 +391,7 @@ mod tests {
         assert_eq!(on_hold(&mut s), Some(A_SHOW));
         s.now = 1000 + TAP_MS - 1;
         let o = step(&mut s, VK_LWIN_, false);
-        assert_eq!(o.posts, vec![A_CANCEL]);
+        assert_eq!(o.posts, vec![A_TAP]);
         assert!(!o.swallow && !o.inject);
         // a quick V press is not a tap: release commits
         s.now = 5000;
@@ -388,7 +407,31 @@ mod tests {
         step(&mut s, VK_LWIN_, true);
         on_hold(&mut s);
         s.now = 20; // 31 ms later
-        assert_eq!(step(&mut s, VK_LWIN_, false).posts, vec![A_CANCEL]);
+        assert_eq!(step(&mut s, VK_LWIN_, false).posts, vec![A_TAP]);
+    }
+
+    #[test]
+    fn missed_win_up_does_not_eat_next_press() {
+        let mut s = st();
+        s.now = 1000;
+        step(&mut s, VK_LWIN_, true);
+        on_hold(&mut s);
+        // Win up never arrives (e.g. lock screen). A press 10 s later is a new press:
+        s.now = 11_000;
+        let o = step(&mut s, VK_LWIN_, true);
+        assert!(o.start_timer && o.stop_timer);
+        assert_eq!(s.phase, Phase::Armed);
+        assert_eq!(on_hold(&mut s), Some(A_SHOW));
+        // real auto-repeat (every ~30 ms) is still ignored
+        let mut s = st();
+        s.now = 1000;
+        step(&mut s, VK_LWIN_, true);
+        on_hold(&mut s);
+        for t in (1500..4000).step_by(33) {
+            s.now = t;
+            assert_eq!(step(&mut s, VK_LWIN_, true), Out::default());
+        }
+        assert_eq!(s.phase, Phase::Shown);
     }
 
     #[test]

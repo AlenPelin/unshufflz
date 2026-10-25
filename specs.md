@@ -31,7 +31,7 @@ Current version: **0.2.0**. The version lives in the root `Cargo.toml`. The inst
 | Release profile (workspace root) | `opt-level=3`, `lto=true`, `codegen-units=1`, `panic="abort"`, `strip=true` |
 | Subsystem | `#![windows_subsystem = "windows"]` (no console), for both exes |
 
-App `windows-sys` features: `Win32_Foundation`, `Win32_Security`, `Win32_Graphics_Gdi`, `Win32_Storage_FileSystem`, `Win32_System_Com`, `Win32_System_DataExchange`, `Win32_System_Diagnostics_Debug`, `Win32_System_LibraryLoader`, `Win32_System_Memory`, `Win32_System_Registry`, `Win32_System_SystemInformation`, `Win32_System_Threading`, `Win32_System_Time`, `Win32_UI_Controls`, `Win32_UI_HiDpi`, `Win32_UI_Input_KeyboardAndMouse`, `Win32_UI_Shell`, `Win32_UI_WindowsAndMessaging`.
+App `windows-sys` features: `Win32_Foundation`, `Win32_Security`, `Win32_Graphics_Gdi`, `Win32_Storage_FileSystem`, `Win32_System_Com`, `Win32_System_DataExchange`, `Win32_System_Diagnostics_Debug`, `Win32_System_LibraryLoader`, `Win32_System_Memory`, `Win32_System_Registry`, `Win32_System_SystemInformation`, `Win32_System_Threading`, `Win32_System_Time`, `Win32_UI_Accessibility`, `Win32_UI_Controls`, `Win32_UI_HiDpi`, `Win32_UI_Input_KeyboardAndMouse`, `Win32_UI_Shell`, `Win32_UI_WindowsAndMessaging`.
 
 Installer features:
 - `windows-sys`: `Win32_Foundation`, `Win32_System_Registry`, `Win32_System_Threading`, `Win32_UI_WindowsAndMessaging`.
@@ -65,7 +65,7 @@ Installer features:
 | `src/store.rs` | Disk format, safe writes, writer thread, loading, cleanup |
 | `src/tray.rs` | Tray icon, menu, autostart registry |
 | `src/config.rs` | `Config`, `Side`, INI parse / format / save |
-| `src/util.rs` | UTF-16 helpers, `human_size`, `now_unix`, `format_time`, paths, `replace_file`, `write_file_safe` |
+| `src/util.rs` | UTF-16 helpers, `human_size`, `now_unix`, `format_time`, paths, `replace_file`, `write_file_safe`, `window_exe_name`, `debug` (diagnostic log) |
 | `installer/Cargo.toml` | Package `unshufflz-setup` |
 | `installer/build.rs` | Manifest, `APP_EXE` path, `APP_VERSION` |
 | `installer/src/main.rs` | Install / uninstall logic |
@@ -88,6 +88,8 @@ Startup (`main` → `app::run`):
 9. Load up to `MaxItems` items from disk (section 9.5).
 10. Capture what is on the clipboard now.
 11. `AddClipboardFormatListener`, add the tray icon, start the hook thread.
+    - `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, …, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS)`: its callback posts `WM_APP_FOREGROUND` (lParam = new foreground window) to the overlay window.
+    - `start_open` starts as `is_start_menu(GetForegroundWindow())`.
 12. Message loop: `GetMessageW`. If the settings window is open and `IsDialogMessageW(settings, &msg)` handles the message (Tab, Enter, Esc), skip it. Otherwise `TranslateMessage` + `DispatchMessageW`.
 
 Shutdown:
@@ -106,17 +108,19 @@ Shutdown:
 
 | Message | Value | From → to | wParam / lParam |
 |---|---|---|---|
-| `WM_APP_HOOK` | `WM_APP+1` | hook → main | wParam = action (1 SHOW, 2 PREV, 3 NEXT, 4 COMMIT, 5 CANCEL, 6 DELETE, 7 SAVE) |
+| `WM_APP_HOOK` | `WM_APP+1` | hook → main | wParam = action (1 SHOW, 2 PREV, 3 NEXT, 4 COMMIT, 5 CANCEL, 6 DELETE, 7 SAVE, 8 TAP) |
 | `WM_APP_SAVED` | `WM_APP+2` | writer → main | lParam = item id |
 | `WM_APP_TRAY` | `WM_APP+3` | shell → main | lParam low word = mouse message |
 | `WM_APP_SETTINGS` | `WM_APP+4` | second instance → main | open the settings window |
+| `WM_APP_FOREGROUND` | `WM_APP+5` | WinEvent callback → main | lParam = new foreground window |
 
 Main window timers:
 
 | Id | Interval | Purpose |
 |---|---|---|
 | 1 `TIMER_CAPTURE` | 80 ms, one-shot | Started on each `WM_CLIPBOARDUPDATE`, so a burst of updates is read once |
-| 2 `TIMER_WATCH` | 150 ms, while visible | Hide the overlay if no Win key is down (`GetAsyncKeyState`) |
+| 2 `TIMER_WATCH` | 150 ms, while visible | Hide the overlay if no Win key is down (`GetAsyncKeyState`), except in ShowWithStart mode while Start is open or `tap_pending` |
+| 3 `TIMER_TAP` | 600 ms, one-shot | ShowWithStart: after a quick tap, hide the overlay if Start did not open |
 
 App state lives in a thread-local `RefCell<Option<App>>`. Handlers use `try_borrow_mut`, so a re-entrant message is skipped instead of panicking. A capture that hits a busy state restarts timer 1.
 
@@ -133,6 +137,7 @@ App state lives in a thread-local `RefCell<Option<App>>`. Handlers use `try_borr
 | Injection marker (`dwExtraInfo`) | 0x434C4950 |
 | Hold delay | `HoldDelayMs` (default 0 = show at once) |
 | Tap time `TAP_MS` | 300 ms |
+| Stale press `STALE_MS` | 1500 ms |
 
 ### 6.2 Hook thread
 
@@ -144,17 +149,20 @@ App state lives in a thread-local `RefCell<Option<App>>`. Handlers use `try_borr
 
 ### 6.3 State machine (pure, unit-tested)
 
-State: `phase` ∈ {Idle, Armed, Shown, Cancelled, Passthrough}; `win` = the Win VK that started the sequence; `mods` = bits of the modifiers held now; `image` = whether the current clipboard item is an image; `now` = this event's time (`KBDLLHOOKSTRUCT.time`, ms); `down_time` = when Win went down; `acted` = C/V/B/S was pressed during this hold.
+State: `phase` ∈ {Idle, Armed, Shown, Cancelled, Passthrough}; `win` = the Win VK that started the sequence; `mods` = bits of the modifiers held now; `image` = whether the current clipboard item is an image; `now` = this event's time (`KBDLLHOOKSTRUCT.time`, ms); `down_time` = when Win went down; `acted` = C/V/B/S was pressed during this hold; `last_win` = time of the last event of the held Win key.
 - `image` is copied from a global `AtomicBool` before each event. The main thread sets it with `hook::set_image_on_clipboard` after every history change (in `save_index`) and after loading.
 - Before any rule, `mods` is updated: a modifier down sets its bit, up clears it (in every phase).
 Output: `swallow`, `inject`, `posts[]`, `start_timer`, `stop_timer`.
 
 Rules for `step(vk, down)`, checked in this order:
-1. **Idle**: Win down → Armed, `win=vk`, `down_time=now`, `acted=false`, start_timer. Everything passes.
-2. **vk == win**:
+0. **Missed release**: phase is not Idle, this is the held Win key going down, and `now − last_win > STALE_MS` → phase = Idle and stop_timer, then continue with rule 1.
+   - Auto-repeat comes at least about once a second while Win is the last key pressed, and stops once another key is pressed. So a later Win down can only be a new press after a Win up the hook never saw (lock screen, UAC prompt, admin window).
+   - Without this rule, that press would be taken as a repeat and ignored.
+1. **Idle**: Win down → Armed, `win=vk`, `down_time=last_win=now`, `acted=false`, start_timer. Everything passes.
+2. **vk == win** (sets `last_win=now`):
    - down (auto-repeat) → nothing.
    - up → stop_timer, phase = Idle, and:
-     - from Shown, a **tap** (`!acted` and `now − down_time < TAP_MS`, using wrapping subtraction) → post CANCEL and pass the Win up, so **the Start menu opens. This is intended**: with a short or zero delay the overlay is already visible on a quick tap, and the tap must still open Start;
+     - from Shown, a **tap** (`!acted` and `now − down_time < TAP_MS`, using wrapping subtraction) → post **TAP** and pass the Win up, so **the Start menu opens (or closes, if it was open). This is intended**: with a short or zero delay the overlay is already visible on a quick tap, and the tap must still open Start;
      - from Shown otherwise → post COMMIT, swallow, inject (Start stays closed);
      - from Cancelled → swallow, inject;
      - otherwise → pass.
@@ -268,8 +276,20 @@ Selection and scrolling:
 - **SHOW**: if hidden, sel = 0 and scroll = 0.
 - **PREV**: sel+1, limited to len−1. **NEXT**: sel−1, limited to 0. After either: `scroll = keep_visible(sel, scroll, LIST_ROWS)`.
 - **COMMIT**: if `0 < sel < len`, select the item; then sel = 0. **CANCEL**: hide, sel = 0.
+- **TAP**: like CANCEL, except in ShowWithStart mode (below).
 - **DELETE**: show if hidden, `delete(sel)`, then `keep_visible`, repaint.
 - **SAVE**: show if hidden, `save_image()`, sel = 0, scroll = 0, repaint.
+- **ShowWithStart mode** (`Config.show_with_start`): the overlay is also shown while the Start menu is open.
+  - `is_start_menu(hwnd)`: the window's process (`util::window_exe_name`) is `StartMenuExperienceHost.exe` (Windows 10 / older 11) or `SearchHost.exe` (newer Windows 11, where Start and Search share a process; checked on 26200: the open Start menu's foreground window belongs to SearchHost). Case-insensitive.
+  - `on_foreground(hwnd)`:
+    - `open = is_start_menu(hwnd)`; nothing happens unless it differs from `start_open`. `start_open` is tracked even when the mode is off.
+    - If the mode is on and Start **opened**: clear `tap_pending`, stop timer 3, show (sel = 0).
+    - If the mode is on and Start **closed**: hide (sel = 0), unless a Win key is down; then the key release decides.
+  - SHOW while `start_open` and the overlay is hidden → ignored. Pressing Win with Start open closes Start, so the overlay must not flash. C/V/B/S in the same press still show it, because their actions call `show()`.
+  - TAP while Start is closed and the overlay is visible: set `tap_pending`, start timer 3 (600 ms), keep the overlay. Either Start opens (`on_foreground` takes over), or the timer hides it.
+  - TAP in any other case → hide.
+  - The watch timer (2) does not hide the overlay while `start_open || tap_pending`.
+  - COMMIT and CANCEL hide the overlay as usual, also while Start stays open (Start was masked, so it stays open).
 - `keep_visible(sel, scroll, rows)` moves the window as little as possible:
   - `sel < scroll` → `sel`;
   - `sel ≥ scroll+rows` → `sel+1−rows`;
@@ -440,6 +460,7 @@ File: `%LOCALAPPDATA%\Unshufflz\unshufflz.ini`. It is read once at start and wri
 | `Position` | right | `right` / `left` (any case) |
 | `MaxItems` | 10 | 1–100 (`MAX_ITEMS_LIMIT`) |
 | `MaxItemMB` | 200 | 1–2048 |
+| `ShowWithStart` | 0 | 0 / 1 (any non-zero number = on) |
 | `PicturesDir` | empty (= `Pictures\Clipboard`) | folder path, taken as-is (trimmed); `=` inside the path is fine because only the first `=` splits the line |
 
 Parsing:
@@ -448,7 +469,7 @@ Parsing:
 - Unknown keys, sections and bad values are ignored.
 
 Saving (`config::save`):
-- Writes all six keys under `[General]` with CRLF line ends: HoldDelayMs, WidthPercent, Position, MaxItems, MaxItemMB, PicturesDir.
+- Writes all seven keys under `[General]` with CRLF line ends: HoldDelayMs, WidthPercent, Position, MaxItems, MaxItemMB, PicturesDir, ShowWithStart.
 - Uses `util::write_file_safe`: `.tmp`, `sync_all`, `replace_file`.
 
 ## 14. Settings window (`settings.rs`)
@@ -458,7 +479,7 @@ Opened from tray **Settings…** or by a second launch (`WM_APP_SETTINGS`). Only
 
 - `InitCommonControlsEx(ICC_BAR_CLASSES)`.
 - Class `UnshufflzSettings`: arrow cursor, `COLOR_BTNFACE` background. Title "Unshufflz Settings". Style `WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU` (fixed size).
-- Client area 360 × 332 (scaled by the window's DPI, sized with `AdjustWindowRectExForDpi`), centered on the work area of the monitor under the cursor.
+- Client area 360 × 362 (scaled by the window's DPI, sized with `AdjustWindowRectExForDpi`), centered on the work area of the monitor under the cursor.
 - Font: `lfMessageFont` from `SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS)`, sent to every control with `WM_SETFONT`.
 - Controls (x, y, w, h in 96-dpi units):
 
@@ -471,14 +492,15 @@ Opened from tray **Settings…** or by a second launch (`WM_APP_SETTINGS`). Only
 | EDIT (client edge, `ES_NUMBER`, right-aligned) | 103 | 284,85,60,24 | max 3 characters |
 | STATIC "Show delay when holding Win (ms, 0-2000)" | – | 16,122,260,20 | |
 | EDIT (client edge, `ES_NUMBER`, right-aligned) | 104 | 284,119,60,24 | max 4 characters |
-| STATIC "Save pictures (Win+S) to folder" | – | 16,156,328,20 | |
-| EDIT (client edge, `ES_AUTOHSCROLL`) | 105 | 16,178,240,24 | `PicturesDir`; cue banner (`EM_SETCUEBANNER`) = `default_dir()` |
-| Button "Browse…" | 106 | 262,177,82,26 | folder picker |
-| STATIC "Position" | – | 16,212,260,20 | |
-| Radio "Right side of the screen" | 101 | 24,234,300,22 | `WS_GROUP`, auto radio |
-| Radio "Left side of the screen" | 102 | 24,258,300,22 | auto radio |
-| Button OK (default) | IDOK | 168,292,84,28 | `WS_GROUP` |
-| Button Cancel | IDCANCEL | 260,292,84,28 | |
+| Checkbox "Also show while the Start menu is open" | 107 | 16,152,328,22 | `BS_AUTOCHECKBOX`; `ShowWithStart` |
+| STATIC "Save pictures (Win+S) to folder" | – | 16,186,328,20 | |
+| EDIT (client edge, `ES_AUTOHSCROLL`) | 105 | 16,208,240,24 | `PicturesDir`; cue banner (`EM_SETCUEBANNER`) = `default_dir()` |
+| Button "Browse…" | 106 | 262,207,82,26 | folder picker |
+| STATIC "Position" | – | 16,242,260,20 | |
+| Radio "Right side of the screen" | 101 | 24,264,300,22 | `WS_GROUP`, auto radio |
+| Radio "Left side of the screen" | 102 | 24,288,300,22 | auto radio |
+| Button OK (default) | IDOK | 168,322,84,28 | `WS_GROUP` |
+| Button Cancel | IDCANCEL | 260,322,84,28 | |
 
 - Focus starts on the trackbar. Tab moves between controls, Enter = OK, Esc = Cancel (through `IsDialogMessageW` in the main loop).
 - **OK**:
@@ -486,6 +508,7 @@ Opened from tray **Settings…** or by a second launch (`WM_APP_SETTINGS`). Only
   - side = Right if the right radio is checked, else Left;
   - count = the edit text parsed as a number (10 if invalid), clamped to 1–100;
   - delay = the delay edit parsed as a number (0 if invalid), at most 2000;
+  - show with Start = checkbox state;
   - pictures folder = `clean_dir(text)`: trimmed, surrounding `"` removed. It must be empty or an absolute path (`D:\x`, `\\server\share\x`). Otherwise a warning box ("Please enter a full folder path …") is shown, focus moves to the box, and the window stays open;
   - then `app::apply_settings` (section 8) and close.
 - **Browse…**:
@@ -606,17 +629,27 @@ Errors show "Setup failed: …" (unless silent) and set exit code 1. User data i
   3. Copies the installer to `dist\UnshufflzSetup-<version>.exe`.
 - A plain `cargo build` builds only the app (`default-members`). The installer must be built after the app.
 
+## 17a. Debug log (`util::debug`)
+
+- On only when the environment variable `UNSHUFFLZ_DEBUG` is `1` (read once, `OnceLock`).
+- Each call appends `"<GetTickCount64 ms> <thread id> <message>\r\n"` to `%LOCALAPPDATA%\Unshufflz\debug.log`. The message is built only when logging is on.
+- Logged:
+  - hook events (vk, down/up, event time, flags, phase before → after, output), but only when the phase before or after is not Idle, so normal typing is never written;
+  - main-thread actions;
+  - the moment the overlay is shown;
+  - Start menu open/close.
+
 ## 18. Tests
 
-`cargo test --release` (app, 44 tests):
+`cargo test --release` (app, 45 tests):
 
 | Module | Tests |
 |---|---|
-| hook | quick tap; quick tap with the overlay already shown → CANCEL and Win up passes (Start opens), also across tick-counter wrap; a quick V is not a tap; hold → SHOW, release → COMMIT + inject; V/C navigation and swallowing; B → SHOW + DELETE, swallowed, Start menu masked; S taken only with an image and no modifiers (Win+S Search and Win+Shift+S pass); Win+E passthrough; other key while shown → CANCEL; modifiers; Esc cancel + mask; Esc before overlay; C/V without Win |
+| hook | missed Win up: a Win down 10 s later is a new press, while real auto-repeat (every 33 ms for 2.5 s) is still ignored; quick tap; quick tap with the overlay already shown → TAP and Win up passes (Start opens), also across tick-counter wrap; a quick V is not a tap; hold → SHOW, release → COMMIT + inject; V/C navigation and swallowing; B → SHOW + DELETE, swallowed, Start menu masked; S taken only with an image and no modifiers (Win+S Search and Win+Shift+S pass); Win+E passthrough; other key while shown → CANCEL; modifiers; Esc cancel + mask; Esc before overlay; C/V without Win |
 | store | item round trip; bit flip / truncation / empty rejected; index round trip + cleanup; broken index → scan; writer thread + double shutdown; **1000 items with a limit of 10 → exactly 10 item files + index on disk, newest 10 loaded in order** |
 | preview | DROPFILES parsing; text / RTF / files / image previews; thumbnail scaling; small image not enlarged; bad DIBs rejected |
 | history | duplicate key with extra formats; registered formats hashed by name; different text; `keep_visible` scrolling |
-| config | defaults and overrides incl. Position and MaxItems; clamping; format → parse round trip |
+| config | defaults and overrides incl. Position and MaxItems; clamping; format → parse round trip incl. PicturesDir and ShowWithStart |
 | settings | folder box: empty OK, quotes removed, UNC OK, relative and drive-relative (`D:pics`) rejected |
 | imagesave | `target_dir` (empty → default `…\Clipboard`, else the setting); 24-bit bottom-up conversion; 32-bit alpha rules (all-zero → opaque, real alpha kept); 8-bit palette through GDI; broken / compressed DIBs rejected; PNG round trip (RGBA, and RGB when opaque); file names incl. `_2`; saving twice in one second makes two files; a `PNG` format is written as-is; file payload parses back to the path |
 | util | sizes; UTF-16 helpers; time format |
@@ -638,6 +671,16 @@ Manual checks done:
   - a quoted path was saved without quotes as `PicturesDir`;
   - Win+S then saved `Unshufflz_….png` into that folder, and the clipboard held that file;
   - the setting was set back to empty afterwards.
+- ShowWithStart mode (simulated keys, debug log on):
+  1. tap → Start open and overlay shown;
+  2. Win+V+V → overlay shown;
+  3. release → overlay hidden, clipboard 2 items back, Start still open;
+  4. Win press with Start open → no overlay at any point, and Start closed;
+  5. tap → Start and overlay;
+  6. Esc → both closed.
+
+  A screenshot showed the overlay at the right edge, next to the open Start menu.
+- Debug log: a run without filtering recorded ordinary typing; it was deleted, and logging was limited to keys while Win is held.
 - Win+B (simulated): clipboard went from "del B" back to "del A", and the item was removed from the index;
 - settings window: opened by a second launch; screenshot checked (themed controls); OK wrote `WidthPercent=20`, `Position=left`, `MaxItems=25` to the INI, and the values were set back afterwards.
 
@@ -656,5 +699,6 @@ Not yet checked by hand:
 - Stored data is not encrypted.
 - File items store paths only.
 - Thumbnails ignore alpha. RLE / JPEG / PNG-compressed DIBs get no thumbnail but are still stored and restored.
-- If the hook misses a Win up, timer 2 hides the overlay; the hook state fixes itself on the next Win release.
+- If the hook misses a Win up, timer 2 hides the overlay; the next Win press is recognised as new by the stale-press rule (6.3, rule 0).
+- ShowWithStart: the Windows Search panel shares SearchHost.exe with Start on newer Windows 11, so the overlay also shows with Search. If Start is set to open on the left edge and the overlay is on the left, Start covers it (Start is drawn in a higher layer than topmost windows).
 - The settings window does not re-layout when moved to a monitor with a different DPI (it is sized for the DPI it opened on).

@@ -4,8 +4,8 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::{DeleteEnhMetaFile, GetEnhMetaFileBits, SetEnhMetaFileBits};
 use windows_sys::Win32::System::DataExchange::*;
 use windows_sys::Win32::System::Memory::*;
-use windows_sys::Win32::System::Threading::*;
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows_sys::Win32::System::Threading::Sleep;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 pub const CF_TEXT: u32 = 1;
 pub const CF_BITMAP: u32 = 2;
@@ -174,24 +174,7 @@ fn owner_name() -> String {
         if hwnd.is_null() {
             hwnd = GetForegroundWindow();
         }
-        let mut pid = 0;
-        GetWindowThreadProcessId(hwnd, &mut pid);
-        if pid == 0 {
-            return String::new();
-        }
-        let ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if ph.is_null() {
-            return String::new();
-        }
-        let mut buf = [0u16; 520];
-        let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(ph, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len);
-        CloseHandle(ph);
-        if ok == 0 {
-            return String::new();
-        }
-        let full = String::from_utf16_lossy(&buf[..len as usize]);
-        full.rsplit('\\').next().unwrap_or("").to_string()
+        crate::util::window_exe_name(hwnd)
     }
 }
 

@@ -57,7 +57,7 @@ The app runs in the background and adds a tray icon.
 | Hold Win + **S** (current item is an image) | Save the image as PNG to `Pictures\Clipboard\Unshufflz_yyyyMMdd_HHmmss.png` (the folder can be changed in Settings). In history and on the clipboard, the image is replaced by the saved file, as if you had copied it in Explorer, so Ctrl+V pastes the file. If the current item is not an image, or Shift/Ctrl/Alt is held, Win+S does its normal Windows thing (Search; Win+Shift+S = snipping). |
 | Hold Win + **Esc** | Close the overlay without changing anything |
 | Hold Win + other key (Win+E, Win+D, …) | Overlay closes and the normal Windows shortcut runs |
-| Quick Win tap (released within 300 ms, no other key) | The overlay flashes and hides, and the Start menu opens as usual. **This is expected and fine.** Holding Win longer and releasing it without pressing a key does not open Start. |
+| Quick Win tap (released within 300 ms, no other key) | The overlay flashes and hides, and the Start menu opens as usual. **This is expected and fine.** Holding Win longer and releasing it without pressing a key does not open Start. With **"Also show while the Start menu is open"** on, the overlay stays instead (see below). |
 
 The overlay shows:
 - **Header:** the position (`3 / 25`), the type and size of the content, when it was copied, and from which app.
@@ -87,6 +87,7 @@ The **Settings** window (tray menu → Settings…) has:
 | Overlay width | 5–50 % of the screen width (slider) | 15 % |
 | Items to keep in history | 1–100 | 10 |
 | Show delay when holding Win | 0–2000 ms | 0 (instant) |
+| Also show while the Start menu is open | on / off | off |
 | Save pictures (Win+S) to folder | any full folder path; **Browse…** opens the Windows folder picker | empty = `Pictures\Clipboard` (shown as a grey hint) |
 | Position | Right side / Left side of the screen | Right |
 
@@ -105,6 +106,7 @@ Position=right    ; right | left
 MaxItems=10       ; 1..100
 MaxItemMB=200     ; 1..2048   clipboard content bigger than this is not stored
 PicturesDir=      ; folder for Win+S pictures; empty = Pictures\Clipboard
+ShowWithStart=0   ; 1 = also show the overlay while the Start menu is open
 ```
 
 ## Where data is stored
@@ -152,6 +154,21 @@ The app must be built before the installer, because the installer contains it.
 Exit any copy of the app running from `target\` first, or the build cannot overwrite it.
 The version comes from the root `Cargo.toml`.
 
+### Show with the Start menu
+
+With **Also show while the Start menu is open** turned on, the overlay appears whenever the Start menu is open. That includes opening Start with a quick Win tap or with the mouse. It stays as long as Start is open:
+
+| Step | Result |
+|---|---|
+| Press Win | Start opens **and** the overlay shows |
+| Hold Win + V / C | Select an item (B and S work too) |
+| Release Win | The selected item goes on the clipboard and the overlay hides. Start stays open. |
+| Press Win again | Start closes; the overlay does not show |
+| Press Win again | Start opens and the overlay shows again |
+| Esc, or click elsewhere | Start closes and the overlay hides |
+
+On newer Windows 11 versions, the Windows Search panel is the same program as Start, so the overlay shows with Search too.
+
 ## Troubleshooting
 
 | Problem | Cause / fix |
@@ -160,3 +177,16 @@ The version comes from the root `Cargo.toml`.
 | Start menu opens after using the overlay | Should not happen. If it does, another keyboard tool may be interfering. |
 | An item is missing from history | It was bigger than `MaxItemMB`, marked private, or the clipboard was locked by another app. |
 | Second copy does not start | Only one copy runs (by design); starting it again opens the settings. |
+| Overlay does not appear when expected | Start the app with a debug log (see below) and look at what it records. |
+
+**Debug log**:
+- Exit the app, then start it from a command prompt with the environment variable `UNSHUFFLZ_DEBUG=1`:
+  ```
+  set UNSHUFFLZ_DEBUG=1
+  "%LOCALAPPDATA%\Programs\Unshufflz\unshufflz.exe"
+  ```
+- It writes `%LOCALAPPDATA%\Unshufflz\debug.log`, one line per event, with a millisecond timestamp:
+  - key events while Win is held (normal typing is never logged);
+  - what the app does: show, hide, actions;
+  - when the Start menu opens and closes.
+- Delete the file when done. Without the variable, nothing is logged.

@@ -1,7 +1,7 @@
 use crate::clip::{self, Payload};
 use crate::config::{self, Config, Side};
 use crate::history::{self, Item, RAM_LIMIT};
-use crate::hook::{self, A_CANCEL, A_COMMIT, A_DELETE, A_NEXT, A_PREV, A_SAVE, A_SHOW, WM_APP_HOOK};
+use crate::hook::{self, A_CANCEL, A_COMMIT, A_DELETE, A_NEXT, A_PREV, A_SAVE, A_SHOW, A_TAP, WM_APP_HOOK};
 use crate::imagesave;
 use crate::paint::{self, Fonts};
 use crate::preview::{self, Kind};
@@ -19,14 +19,23 @@ use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::DataExchange::*;
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_RWIN};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 pub const WM_APP_SAVED: u32 = WM_APP + 2;
 /// Sent by a second instance: open the settings window.
 pub const WM_APP_SETTINGS: u32 = WM_APP + 4;
+/// The foreground window changed (lParam = new foreground HWND).
+const WM_APP_FOREGROUND: u32 = WM_APP + 5;
 const TIMER_CAPTURE: usize = 1;
 const TIMER_WATCH: usize = 2;
+/// After a quick Win tap: wait this long for the Start menu to open (ShowWithStart mode).
+const TIMER_TAP: usize = 3;
+const TAP_WAIT_MS: u32 = 600;
+/// Processes that own the open Start menu: StartMenuExperienceHost on Windows 10 and
+/// older Windows 11, SearchHost on newer Windows 11 (it also hosts the Search panel).
+const START_MENU_EXES: [&str; 2] = ["StartMenuExperienceHost.exe", "SearchHost.exe"];
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
@@ -44,13 +53,16 @@ pub struct App {
     store: Store,
     dir: PathBuf,
     thumb_w: i32,
+    /// The Start menu is the foreground window.
+    start_open: bool,
+    /// A quick Win tap happened; waiting up to TAP_WAIT_MS for Start to open.
+    tap_pending: bool,
 }
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
 
-/// Run `f` on the app state; None if it is busy (re-entrant message).
 /// Max thumbnail width: the overlay width on the primary monitor minus padding.
 fn thumb_width(width_pct: u32) -> i32 {
     unsafe { GetSystemMetrics(SM_CXSCREEN) * width_pct as i32 / 100 - 32 }
@@ -61,6 +73,7 @@ pub fn apply_settings(cfg: Config) {
     with_app(|a| a.apply_settings(cfg));
 }
 
+/// Run `f` on the app state; None if it is busy (re-entrant message).
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|a| a.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
 }
@@ -109,6 +122,8 @@ pub fn run(cfg: Config) {
             dir,
             thumb_w,
             cfg,
+            start_open: is_start_menu(GetForegroundWindow()),
+            tap_pending: false,
         };
         app.load();
         app.update_image_flag();
@@ -119,6 +134,8 @@ pub fn run(cfg: Config) {
         AddClipboardFormatListener(hwnd);
         tray::add(hwnd);
         hook::start(hwnd, hold);
+        // Foreground changes tell us when the Start menu opens or closes.
+        SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, null_mut(), Some(on_win_event), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
@@ -200,7 +217,11 @@ impl App {
     }
 
     fn on_hook(&mut self, a: usize) {
+        crate::util::debug(|| format!("main action {} visible={}", a, self.visible));
         match a {
+            // ShowWithStart: Win pressed while Start is open closes Start; don't show then.
+            // (C/V/B/S during that press still show the overlay.)
+            A_SHOW if self.cfg.show_with_start && self.start_open && !self.visible => {}
             A_SHOW => self.show(),
             A_PREV => {
                 self.show();
@@ -224,6 +245,16 @@ impl App {
                 self.sel = 0;
             }
             A_CANCEL => {
+                self.hide();
+                self.sel = 0;
+            }
+            A_TAP if self.cfg.show_with_start && !self.start_open && self.visible => {
+                // Start is opening: keep the overlay; on_foreground() takes over, or the
+                // timer hides it if Start did not open.
+                self.tap_pending = true;
+                unsafe { SetTimer(self.hwnd, TIMER_TAP, TAP_WAIT_MS, None) };
+            }
+            A_TAP => {
                 self.hide();
                 self.sel = 0;
             }
@@ -345,6 +376,7 @@ impl App {
             SetTimer(self.hwnd, TIMER_WATCH, 150, None);
         }
         self.visible = true;
+        crate::util::debug(|| "main overlay shown".to_string());
         self.invalidate();
     }
 
@@ -360,9 +392,44 @@ impl App {
     }
 
     /// Safety net: hide if Win is no longer down (e.g. the hook missed the key up).
+    /// In ShowWithStart mode the overlay stays while Start is open (or about to open).
     fn watch(&mut self) {
-        let down = |vk: u16| unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 };
-        if !down(VK_LWIN) && !down(VK_RWIN) {
+        if self.cfg.show_with_start && (self.start_open || self.tap_pending) {
+            return;
+        }
+        if !win_down() {
+            self.hide();
+            self.sel = 0;
+        }
+    }
+
+    fn on_tap_timer(&mut self) {
+        unsafe { KillTimer(self.hwnd, TIMER_TAP) };
+        self.tap_pending = false;
+        if !self.start_open {
+            self.hide();
+            self.sel = 0;
+        }
+    }
+
+    /// The foreground window changed: track whether the Start menu is open.
+    fn on_foreground(&mut self, fg: HWND) {
+        let open = is_start_menu(fg);
+        if open == self.start_open {
+            return;
+        }
+        self.start_open = open;
+        crate::util::debug(|| format!("main start menu open={}", open));
+        if !self.cfg.show_with_start {
+            return;
+        }
+        if open {
+            self.tap_pending = false;
+            unsafe { KillTimer(self.hwnd, TIMER_TAP) };
+            self.show();
+        } else if !win_down() {
+            // Start closed (Esc, click elsewhere, app launched). If Win is held, the
+            // key release decides instead.
             self.hide();
             self.sel = 0;
         }
@@ -420,6 +487,27 @@ impl App {
     }
 }
 
+fn win_down() -> bool {
+    let down = |vk: u16| unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 };
+    down(VK_LWIN) || down(VK_RWIN)
+}
+
+fn is_start_menu(hwnd: HWND) -> bool {
+    if hwnd.is_null() {
+        return false;
+    }
+    let exe = crate::util::window_exe_name(hwnd);
+    START_MENU_EXES.iter().any(|s| exe.eq_ignore_ascii_case(s))
+}
+
+/// WinEvent callback (main thread). Posted on, so the app state is never borrowed twice.
+unsafe extern "system" fn on_win_event(_: HWINEVENTHOOK, _event: u32, hwnd: HWND, _: i32, _: i32, _: u32, _: u32) {
+    let main = FindWindowW(wide("UnshufflzOverlay").as_ptr(), null());
+    if !main.is_null() {
+        PostMessageW(main, WM_APP_FOREGROUND, 0, hwnd as LPARAM);
+    }
+}
+
 unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match m {
         WM_APP_HOOK => {
@@ -428,6 +516,10 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         WM_APP_SETTINGS => {
             with_app(|a| a.on_menu(tray::ID_SETTINGS));
+            0
+        }
+        WM_APP_FOREGROUND => {
+            with_app(|a| a.on_foreground(lp as HWND));
             0
         }
         WM_APP_SAVED => {
@@ -449,6 +541,9 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                 }
                 TIMER_WATCH => {
                     with_app(|a| a.watch());
+                }
+                TIMER_TAP => {
+                    with_app(|a| a.on_tap_timer());
                 }
                 _ => {}
             }

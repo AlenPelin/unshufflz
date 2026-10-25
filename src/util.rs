@@ -84,8 +84,51 @@ pub fn format_time(unix: u64) -> String {
     }
 }
 
+/// Exe file name (e.g. "chrome.exe") of the process that owns `hwnd`; empty on failure.
+pub fn window_exe_name(hwnd: windows_sys::Win32::Foundation::HWND) -> String {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    unsafe {
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 {
+            return String::new();
+        }
+        let ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if ph.is_null() {
+            return String::new();
+        }
+        let mut buf = [0u16; 520];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(ph, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len);
+        CloseHandle(ph);
+        if ok == 0 {
+            return String::new();
+        }
+        let full = String::from_utf16_lossy(&buf[..len as usize]);
+        full.rsplit('\\').next().unwrap_or("").to_string()
+    }
+}
+
 pub fn exe_path() -> PathBuf {
     std::env::current_exe().unwrap_or_default()
+}
+
+static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Diagnostic log, only when the environment variable UNSHUFFLZ_DEBUG=1 is set:
+/// appends "<tick ms> <thread> <message>" to %LOCALAPPDATA%\Unshufflz\debug.log.
+pub fn debug(msg: impl FnOnce() -> String) {
+    if !*DEBUG.get_or_init(|| std::env::var("UNSHUFFLZ_DEBUG").is_ok_and(|v| v == "1")) {
+        return;
+    }
+    let tick = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() };
+    let thread = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+    let line = format!("{} {:>6} {}\r\n", tick, thread, msg());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("debug.log")) {
+        let _ = f.write_all(line.as_bytes());
+    }
 }
 
 /// %LOCALAPPDATA%\Unshufflz
