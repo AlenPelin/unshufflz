@@ -437,6 +437,8 @@ Preview area by kind:
   - The parent folder (small, path ellipsis), row height s(20), then a gap of s(6).
   - Rows of name (body) and size (small, right-aligned, column s(72)).
   - `+N more` when fewer than 2 rows of space are left.
+  - If the item has a thumbnail (single image file, see 12): it is drawn s(10) below the file row, fitted into the rest of the preview area (never enlarged), centered horizontally. It is inside the drag area, so dragging it drags the file.
+- Image thumbnails (both kinds) are drawn by `thumb(dc, t, r)`: `k = min(rw/w, rh/h, 1)`, `StretchBlt` HALFTONE at `(r.left + (rw−dw)/2, r.top)`.
 
 ## 12. Preview building (`preview.rs`)
 
@@ -445,6 +447,12 @@ Order of checks:
    - Parse DROPFILES: `pFiles` u32 at 0, `fWide` u32 at 16; names separated by NUL, ending with an empty name. Invalid data gives an empty list.
    - For up to 500 paths, `fs::metadata` gives `folder`, the readable size (added to the total), or `missing`.
    - info: `Files · {n} file(s), {m} folder(s) · {total}`. text = parent folder of the first path. line = first name, plus ` (+N more)`.
+   - **Thumbnail of an image file**: only when the item is exactly **one existing file** whose extension (any case) is one of `png jpg jpeg jfif gif bmp dib webp tif tiff ico heic avif`.
+     - `SHCreateItemFromParsingName(path)` → `IShellItemImageFactory::GetImage(SIZE{maxW, maxW}, SIIGBF_THUMBNAILONLY)`: Explorer's thumbnail, from its thumbnail cache. The shell fits the image into a square of the larger requested side, so a maxW square keeps the width ≤ maxW. No thumbnail → nothing extra is drawn.
+     - COM must be initialized on the calling thread. Previews are built on the main thread, which has `OleInitialize` (`drag::init`, called before `load`).
+     - The bitmap is read with `GetDIBits` (32-bit top-down), its alpha is **flattened** onto the background color `#202020` (`flatten`), and it is copied into a new DIB section (`Thumb`). The shell's bitmap is deleted.
+     - `flatten(px, bg)`: if every alpha is 0, the bitmap has no alpha, leave it. If no channel is above its alpha anywhere, it is premultiplied: `out = c + bg·(255−a)/255` (max 255); otherwise straight: `out = (c·a + bg·(255−a))/255`. The result is opaque RGB, so it draws like a clipboard image.
+     - Rebuilt with the other thumbnails when the overlay width changes (any item that has a thumbnail).
 2. **Text** (CF_UNICODETEXT):
    - Kind = Rich if `Rich Text Format` or `HTML Format` is present. Label: Text / Rich text (RTF) / (HTML) / (RTF, HTML).
    - info: `{label} · {chars} chars · {lines} line(s)`, lines = `\n` count + 1.

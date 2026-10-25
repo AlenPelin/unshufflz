@@ -33,6 +33,7 @@ pub struct Preview {
     pub info: String,
     /// Body text (Text/Rich/Other) or parent folder (Files).
     pub text: Vec<u16>,
+    /// Image: the scaled clipboard image. Files: shell thumbnail of a single image file.
     pub thumb: Option<Thumb>,
     /// (file name, size or "folder")
     pub files: Vec<(Vec<u16>, Vec<u16>)>,
@@ -42,6 +43,8 @@ pub struct Preview {
 
 const MAX_TEXT: usize = 4000;
 const MAX_FILES: usize = 500;
+/// File extensions that get a thumbnail when a single such file is copied.
+const IMAGE_EXTS: [&str; 13] = ["png", "jpg", "jpeg", "jfif", "gif", "bmp", "dib", "webp", "tif", "tiff", "ico", "heic", "avif"];
 
 pub fn build(p: &Payload, thumb_max_w: i32) -> Preview {
     let get = |id: u32| p.iter().find(|f| f.id == id);
@@ -49,7 +52,7 @@ pub fn build(p: &Payload, thumb_max_w: i32) -> Preview {
     let mut pv = Preview { kind: Kind::Other, info: String::new(), text: Vec::new(), thumb: None, files: Vec::new(), line: Vec::new() };
 
     if let Some(f) = get(CF_HDROP) {
-        files(&mut pv, &f.data);
+        files(&mut pv, &f.data, thumb_max_w);
     } else if let Some(f) = get(CF_UNICODETEXT) {
         let text: Vec<u16> = f.data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
         let rtf = named("Rich Text Format");
@@ -123,7 +126,7 @@ pub fn parse_hdrop(d: &[u8]) -> Vec<String> {
     }
 }
 
-fn files(pv: &mut Preview, d: &[u8]) {
+fn files(pv: &mut Preview, d: &[u8], thumb_max_w: i32) {
     pv.kind = Kind::Files;
     let paths = parse_hdrop(d);
     let (mut nfiles, mut ndirs, mut total) = (0, 0, 0u64);
@@ -160,6 +163,81 @@ fn files(pv: &mut Preview, d: &[u8]) {
     if let Some((first, _)) = pv.files.first() {
         let name = String::from_utf16_lossy(first);
         pv.line = w(&if paths.len() > 1 { format!("{} (+{} more)", name, paths.len() - 1) } else { name });
+    }
+    if let [p] = paths.as_slice() {
+        if is_image_file(p) && nfiles == 1 {
+            pv.thumb = file_thumb(p, thumb_max_w);
+        }
+    }
+}
+
+fn is_image_file(p: &str) -> bool {
+    Path::new(p).extension().and_then(|e| e.to_str()).is_some_and(|e| IMAGE_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// Shell thumbnail (as in Explorer, from its thumbnail cache) of the file at `path`,
+/// fitted into a max_w × max_w square (the shell fits into a square of the larger side)
+/// and flattened onto the overlay background.
+/// Needs COM on this thread (the main thread has OleInitialize, see drag::init).
+fn file_thumb(path: &str, max_w: i32) -> Option<Thumb> {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::System::Com::IBindCtx;
+    use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_THUMBNAILONLY};
+    let max_w = max_w.max(64);
+    unsafe {
+        let f: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(path), None::<&IBindCtx>).ok()?;
+        let src = f.GetImage(SIZE { cx: max_w, cy: max_w }, SIIGBF_THUMBNAILONLY).ok()?.0 as HBITMAP;
+        let t = copy_flat(src);
+        DeleteObject(src);
+        t
+    }
+}
+
+/// Copy a (shell) bitmap into our own 32-bit DIB, with its alpha flattened onto BG.
+unsafe fn copy_flat(src: HBITMAP) -> Option<Thumb> {
+    let mut bm: BITMAP = std::mem::zeroed();
+    if GetObjectW(src, std::mem::size_of::<BITMAP>() as i32, &mut bm as *mut _ as *mut _) == 0 || bm.bmWidth <= 0 || bm.bmHeight == 0 {
+        return None;
+    }
+    let (tw, th) = (bm.bmWidth, bm.bmHeight.abs());
+    let mut bmi: BITMAPINFO = std::mem::zeroed();
+    bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = tw;
+    bmi.bmiHeader.biHeight = -th;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    let mut px = vec![0u32; (tw * th) as usize];
+    let dc = CreateCompatibleDC(null_mut());
+    let got = GetDIBits(dc, src, 0, th as u32, px.as_mut_ptr() as *mut _, &mut bmi, DIB_RGB_COLORS);
+    let mut bits = null_mut();
+    let hbmp = if got == th { CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, null_mut(), 0) } else { null_mut() };
+    DeleteDC(dc);
+    if hbmp.is_null() {
+        return None;
+    }
+    flatten(&mut px, crate::paint::BG);
+    std::ptr::copy_nonoverlapping(px.as_ptr(), bits as *mut u32, px.len());
+    Some(Thumb { hbmp, w: tw, h: th })
+}
+
+/// Blend 0xAARRGGBB pixels onto the opaque COLORREF `bg` (0x00BBGGRR). Pixels may be
+/// premultiplied or not (premultiplied when no channel is above alpha); if every
+/// alpha is 0 the bitmap has no alpha channel and is left as it is.
+fn flatten(px: &mut [u32], bg: u32) {
+    if px.iter().all(|p| p >> 24 == 0) {
+        return;
+    }
+    let ch = |p: u32, s: u32| (p >> s) & 0xFF;
+    let premul = px.iter().all(|&p| {
+        let a = p >> 24;
+        ch(p, 16) <= a && ch(p, 8) <= a && ch(p, 0) <= a
+    });
+    let bg = [bg & 0xFF, (bg >> 8) & 0xFF, (bg >> 16) & 0xFF]; // r, g, b
+    for p in px.iter_mut() {
+        let a = *p >> 24;
+        let mix = |c: u32, b: u32| if premul { (c + b * (255 - a) / 255).min(255) } else { (c * a + b * (255 - a)) / 255 };
+        *p = (mix(ch(*p, 16), bg[0]) << 16) | (mix(ch(*p, 8), bg[1]) << 8) | mix(ch(*p, 0), bg[2]);
     }
 }
 
@@ -246,6 +324,49 @@ mod tests {
         d[14..16].copy_from_slice(&24u16.to_le_bytes());
         d.extend(vec![0x80u8; stride * h as usize]);
         d
+    }
+
+    #[test]
+    fn flatten_alpha() {
+        let bg = 0x0020_2020;
+        // No alpha channel at all: unchanged.
+        let mut px = vec![0x0012_3456, 0x00FF_FFFF];
+        flatten(&mut px, bg);
+        assert_eq!(px, vec![0x0012_3456, 0x00FF_FFFF]);
+        // Premultiplied: transparent -> background, opaque -> itself, half -> c + bg/2.
+        let mut px = vec![0x0000_0000, 0xFFFF_0000, 0x8080_0000];
+        flatten(&mut px, bg);
+        assert_eq!(px, vec![0x0020_2020, 0x00FF_0000, 0x008F_0F0F]);
+        // Straight alpha (a channel above alpha): c·a + bg·(1−a).
+        let mut px = vec![0x80FF_FFFF, 0xFF00_0000];
+        flatten(&mut px, bg);
+        assert_eq!(px, vec![0x008F_8F8F, 0x0000_0000]);
+    }
+
+    #[test]
+    fn single_image_file_gets_shell_thumbnail() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitialize(None);
+        }
+        let path = std::env::temp_dir().join(format!("unshufflz-pv-{}.png", std::process::id()));
+        let mut enc = png::Encoder::new(std::fs::File::create(&path).unwrap(), 400, 200);
+        enc.set_color(png::ColorType::Rgb);
+        enc.write_header().unwrap().write_image_data(&vec![0x80u8; 400 * 200 * 3]).unwrap();
+        let ps = path.to_string_lossy().into_owned();
+        let pv = build(&vec![Fmt { id: CF_HDROP, name: String::new(), data: hdrop(&[&ps]) }], 100);
+        let two = build(&vec![Fmt { id: CF_HDROP, name: String::new(), data: hdrop(&[&ps, &ps]) }], 100);
+        let _ = std::fs::remove_file(&path);
+        let t = pv.thumb.expect("thumbnail");
+        assert!(t.w <= 100 && t.w > 0 && t.h > 0, "{} x {}", t.w, t.h);
+        assert!(two.thumb.is_none()); // only for a single file
+    }
+
+    #[test]
+    fn image_file_extensions() {
+        assert!(is_image_file(r"C:\a\b.PNG"));
+        assert!(is_image_file(r"C:\a\b.jpeg"));
+        assert!(!is_image_file(r"C:\a\b.txt"));
+        assert!(!is_image_file(r"C:\a\png"));
     }
 
     #[test]

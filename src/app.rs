@@ -581,10 +581,10 @@ impl App {
         }
         let _ = config::save(&self.cfg);
         if width_changed {
-            // Rebuild image thumbnails for the new width.
+            // Rebuild thumbnails (images, single image files) for the new width.
             self.thumb_w = thumb_width(width_pct);
             for it in &mut self.items {
-                if it.preview.kind != Kind::Image {
+                if it.preview.kind != Kind::Image && it.preview.thumb.is_none() {
                     continue;
                 }
                 let p = it.payload.clone().or_else(|| store::read_item(&self.dir, it.id).map(Arc::new));

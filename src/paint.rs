@@ -1,7 +1,7 @@
 use crate::app::App;
 use crate::config::Side;
 use crate::history::keep_visible;
-use crate::preview::{Kind, Preview};
+use crate::preview::{Kind, Preview, Thumb};
 use crate::util::{format_time, w, wide};
 use std::ptr::null_mut;
 use windows_sys::Win32::Foundation::*;
@@ -9,7 +9,7 @@ use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
 
 // COLORREF is 0x00BBGGRR
-const BG: u32 = 0x0020_2020;
+pub const BG: u32 = 0x0020_2020;
 const FG: u32 = 0x00F0_F0F0;
 const FG2: u32 = 0x00A8_A8A8;
 const ACCENT: u32 = 0x00D7_7800;
@@ -197,20 +197,9 @@ unsafe fn preview(dc: HDC, f: &Fonts, p: &Preview, r: RECT, s: &dyn Fn(i32) -> i
     if r.bottom <= r.top {
         return rows;
     }
-    let (rw, rh) = (r.right - r.left, r.bottom - r.top);
     match p.kind {
         Kind::Image => match &p.thumb {
-            Some(t) => {
-                let k = (rw as f64 / t.w as f64).min(rh as f64 / t.h as f64).min(1.0);
-                let (dw, dh) = (((t.w as f64 * k) as i32).max(1), ((t.h as f64 * k) as i32).max(1));
-                let src = CreateCompatibleDC(dc);
-                let old = SelectObject(src, t.hbmp);
-                SetStretchBltMode(dc, HALFTONE);
-                SetBrushOrgEx(dc, 0, 0, null_mut());
-                StretchBlt(dc, r.left + (rw - dw) / 2, r.top, dw, dh, src, 0, 0, t.w, t.h, SRCCOPY);
-                SelectObject(src, old);
-                DeleteDC(src);
-            }
+            Some(t) => thumb(dc, t, r),
             None => text(dc, f.body, &w("(no preview)"), r, LINE1 | DT_LEFT, FG2),
         },
         Kind::Files => {
@@ -232,10 +221,31 @@ unsafe fn preview(dc: HDC, f: &Fonts, p: &Preview, r: RECT, s: &dyn Fn(i32) -> i
                 rows.push((y, y + rh1, i));
                 y += rh1;
             }
+            // Single image file: its thumbnail below the file row.
+            if let Some(t) = &p.thumb {
+                let tr = RECT { top: y + s(10), ..r };
+                if tr.bottom > tr.top {
+                    thumb(dc, t, tr);
+                }
+            }
         }
         _ => text(dc, f.body, &p.text, r, DT_LEFT | DT_WORDBREAK | DT_EXPANDTABS | DT_EDITCONTROL, FG),
     }
     rows
+}
+
+/// Draw a thumbnail fitted into `r` (never enlarged), centered horizontally, at the top.
+unsafe fn thumb(dc: HDC, t: &Thumb, r: RECT) {
+    let (rw, rh) = (r.right - r.left, r.bottom - r.top);
+    let k = (rw as f64 / t.w as f64).min(rh as f64 / t.h as f64).min(1.0);
+    let (dw, dh) = (((t.w as f64 * k) as i32).max(1), ((t.h as f64 * k) as i32).max(1));
+    let src = CreateCompatibleDC(dc);
+    let old = SelectObject(src, t.hbmp);
+    SetStretchBltMode(dc, HALFTONE);
+    SetBrushOrgEx(dc, 0, 0, null_mut());
+    StretchBlt(dc, r.left + (rw - dw) / 2, r.top, dw, dh, src, 0, 0, t.w, t.h, SRCCOPY);
+    SelectObject(src, old);
+    DeleteDC(src);
 }
 
 #[cfg(test)]

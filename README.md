@@ -66,6 +66,7 @@ The overlay shows:
   - Text: the wrapped text.
   - Image: the picture and its size.
   - Files: names and sizes. The panel can be dragged with the mouse (the cursor turns into a hand over it).
+    If you copied a single image file (png, jpg, gif, bmp, webp, tif, ico, heic, avif, …), its thumbnail is shown below the name, like Explorer shows it.
   - Other formats: a list of formats.
 - **List:** the items, one line each, with the selected item highlighted. At most 10 rows are shown at once. With a larger history, the list scrolls as you move, so the selection stays visible (no scrollbar). The row numbers show where you are.
 
