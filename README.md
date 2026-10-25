@@ -1,10 +1,12 @@
 # Unshufflz
 
+**Clipboard manager you secretly dreamt of. Built in Rust for 10x engineers (100x, 1Kx, 1Mx too).**
+
 A small clipboard history manager for Windows 10/11, similar to Clipboarder from 8GadgetPack.
 It keeps your recent clipboard items (text, rich text, images, files and any other format).
 While you hold the Win key, it shows them in an overlay on the side of the screen.
 
-- A single 470 KB exe. It needs no runtime, browser engine or JavaScript.
+- A single 490 KB exe. It needs no runtime, browser engine or JavaScript.
 - It uses about 2 MB of private RAM, and 6 threads.
 - History is saved to disk and survives restarts and power loss.
 - You can change the history size (1–100 items), the overlay width and its side in a settings window.
