@@ -49,11 +49,11 @@ The app runs in the background and adds a tray icon.
 
 | Keys | Result |
 |---|---|
-| Hold **Win** | Overlay appears at once with the current clipboard item, sliding in from the screen edge in 50 ms (Apple-style ease-out). A delay can be set in Settings. |
+| Hold **Win** | Overlay appears at once with the current clipboard item highlighted, sliding in from the screen edge in 50 ms (Apple-style ease-out). A delay can be set in Settings. |
 | Hold Win + **V** | Go 1 step back in history (older item) |
 | Hold Win + **C** | Go 1 step forward in history (newer item) |
 | Hold Win + **B** | Delete the highlighted item from history (and disk). If it was the current clipboard item, the next older item goes on the clipboard right away (or the clipboard is emptied if nothing is left). Press B again to delete more. |
-| Release **Win** | The selected item becomes the clipboard content and moves to the top of the list. If you did not move, the clipboard stays as it is. Nothing is pasted automatically, so press Ctrl+V yourself. |
+| Release **Win** | The selected item becomes the clipboard content. It stays at its place in the list (the order does not change), and the next time the overlay opens on it. If you did not move, the clipboard stays as it is. Nothing is pasted automatically, so press Ctrl+V yourself. |
 | Hold Win + **S** (current item is an image) | Save the image as PNG to `Pictures\Clipboard\Unshufflz_yyyyMMdd_HHmmss.png` (the folder can be changed in Settings). In history and on the clipboard, the image is replaced by the saved file, as if you had copied it in Explorer, so Ctrl+V pastes the file. If the current item is not an image, or Shift/Ctrl/Alt is held, Win+S does its normal Windows thing (Search; Win+Shift+S = snipping). |
 | Hold Win, select a file item, then **drag its file panel with the mouse** | The files are dragged out like from Explorer: drop them into an Explorer window, the desktop, a browser upload, a chat app, etc. Press on one file name to drag only that file, or elsewhere in the panel to drag all of them. The drop always copies (or with Alt makes a shortcut); it never moves the original. You can release Win while dragging. |
 | Hold Win + **Esc** | Close the overlay without changing anything |
@@ -75,7 +75,7 @@ Tray icon menu (right click):
 - **Start with Windows**: on/off.
 - **Exit**.
 
-Tip: to paste a stack of copied items, paste with Ctrl+V and then press Win+B. The pasted item is dropped and the previous one is ready for the next Ctrl+V.
+Tip: to paste a stack of copied items newest first, press Ctrl+V, then Win+V, and repeat. Each Win+V takes the next older item, because choosing an item does not move it in the list. Copying something new puts it at the top and starts over from there. Ctrl+V then Win+B works too, but it also deletes each pasted item.
 
 Starting `unshufflz.exe` again (e.g. from the Start menu) while it is running opens the settings window.
 

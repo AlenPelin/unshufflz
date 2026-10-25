@@ -45,6 +45,8 @@ static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 pub struct App {
     pub hwnd: HWND,
     pub items: Vec<Item>,
+    /// Index of the item that is on the clipboard now (the overlay opens on it).
+    cur: usize,
     pub sel: usize,
     /// First history row shown in the list (it shows at most `paint::LIST_ROWS` rows).
     pub scroll: usize,
@@ -127,6 +129,7 @@ pub fn run(cfg: Config) {
         let mut app = App {
             hwnd,
             items: Vec::new(),
+            cur: 0,
             sel: 0,
             scroll: 0,
             slide: 0,
@@ -147,7 +150,7 @@ pub fn run(cfg: Config) {
         };
         app.load();
         app.update_image_flag();
-        app.on_clipboard(); // take what is on the clipboard now
+        app.on_clipboard(true); // take what is on the clipboard now
         let hold = app.cfg.hold_ms;
         APP.with(|a| *a.borrow_mut() = Some(app));
 
@@ -189,31 +192,47 @@ impl App {
         }
     }
 
-    fn on_clipboard(&mut self) {
+    /// `startup`: the clipboard may hold an older history item (chosen before the
+    /// last exit); then that item becomes current and the order is kept.
+    fn on_clipboard(&mut self, startup: bool) {
         if unsafe { GetClipboardSequenceNumber() } == self.ignore_seq {
             return; // our own restore
         }
         if let Some((p, src)) = clip::capture(self.hwnd, &self.fmts, self.cfg.max_item_bytes) {
-            self.add(p, src);
+            self.add(p, src, startup);
         }
     }
 
-    fn add(&mut self, p: Payload, source: String) {
+    fn add(&mut self, p: Payload, source: String, startup: bool) {
         let id = history::full_hash(&p);
-        if self.items.first().is_some_and(|it| it.id == id) {
+        if self.items.get(self.cur).is_some_and(|it| it.id == id) {
             return;
+        }
+        if startup {
+            if let Some(i) = self.items.iter().position(|it| it.id == id) {
+                self.cur = i;
+                self.update_image_flag();
+                return;
+            }
         }
         let key = history::content_key(&p);
         self.items.retain(|it| it.key != key);
+        let item = self.new_item(id, key, p, source);
+        self.items.insert(0, item);
+        self.items.truncate(self.cfg.max_items);
+        self.cur = 0;
+        self.sel = 0;
+        self.save_index();
+        self.invalidate();
+    }
+
+    /// Build the preview and send the payload to the writer.
+    fn new_item(&mut self, id: u64, key: u64, p: Payload, source: String) -> Item {
         let preview = preview::build(&p, self.thumb_w);
         let size = history::payload_size(&p);
         let p = Arc::new(p);
         self.store.save_item(id, p.clone());
-        self.items.insert(0, Item { id, key, time: now_unix(), source, size, payload: Some(p), preview });
-        self.items.truncate(self.cfg.max_items);
-        self.sel = 0;
-        self.save_index();
-        self.invalidate();
+        Item { id, key, time: now_unix(), source, size, payload: Some(p), preview }
     }
 
     /// Called after every history change: persist the order and tell the hook
@@ -225,7 +244,7 @@ impl App {
     }
 
     fn update_image_flag(&self) {
-        hook::set_image_on_clipboard(self.items.first().is_some_and(|it| it.preview.kind == Kind::Image));
+        hook::set_image_on_clipboard(self.items.get(self.cur).is_some_and(|it| it.preview.kind == Kind::Image));
     }
 
     fn on_saved(&mut self, id: u64) {
@@ -259,10 +278,9 @@ impl App {
             }
             A_COMMIT => {
                 self.hide();
-                if self.sel > 0 && self.sel < self.items.len() {
+                if self.sel != self.cur && self.sel < self.items.len() {
                     self.select(self.sel);
                 }
-                self.sel = 0;
             }
             A_CANCEL => {
                 self.hide();
@@ -281,8 +299,8 @@ impl App {
             A_SAVE => {
                 self.show();
                 self.save_image();
-                self.sel = 0;
-                self.scroll = 0;
+                self.sel = self.cur;
+                self.scroll = history::keep_visible(self.sel, self.scroll, paint::LIST_ROWS);
                 self.invalidate();
             }
             A_DELETE => {
@@ -305,35 +323,40 @@ impl App {
             None => {
                 unsafe { MessageBeep(MB_ICONWARNING) };
                 self.items.remove(i);
+                if i < self.cur {
+                    self.cur -= 1;
+                }
+                self.cur = self.cur.min(self.items.len().saturating_sub(1));
                 self.save_index();
                 None
             }
         }
     }
 
-    /// Put item `i` on the clipboard and move it to the top.
+    /// Put item `i` on the clipboard and make it current. The list order is kept, so
+    /// "Ctrl+V, Win+V" walks down the history one item at a time.
     fn select(&mut self, i: usize) {
         let Some(payload) = self.payload(i) else { return };
         if clip::restore(self.hwnd, &payload) {
             self.ignore_seq = unsafe { GetClipboardSequenceNumber() };
         }
-        let mut it = self.items.remove(i);
-        if it.size > RAM_LIMIT {
-            it.payload = None;
-        }
-        self.items.insert(0, it);
-        self.save_index();
+        self.cur = i;
+        self.update_image_flag();
     }
 
     /// Win+B: delete item `i` from history (and disk). If it was the clipboard content
-    /// (i == 0), the next older item goes on the clipboard, or the clipboard is emptied.
+    /// (i == cur), the next older item goes on the clipboard (the newer one if it was the
+    /// oldest), or the clipboard is emptied.
     fn delete(&mut self, i: usize) {
         if i >= self.items.len() {
             return;
         }
         self.items.remove(i);
-        if i == 0 {
+        if i < self.cur {
+            self.cur -= 1;
+        } else if i == self.cur {
             loop {
+                self.cur = self.cur.min(self.items.len().saturating_sub(1));
                 if self.items.is_empty() {
                     if clip::clear(self.hwnd) {
                         self.ignore_seq = unsafe { GetClipboardSequenceNumber() };
@@ -341,7 +364,7 @@ impl App {
                     break;
                 }
                 // payload() drops unreadable items, so try the next one then.
-                if let Some(p) = self.payload(0) {
+                if let Some(p) = self.payload(self.cur) {
                     if clip::restore(self.hwnd, &p) {
                         self.ignore_seq = unsafe { GetClipboardSequenceNumber() };
                     }
@@ -354,12 +377,14 @@ impl App {
     }
 
     /// Win+S: save the current (image) item to Pictures\Clipboard as PNG, replace it in
-    /// history with the saved file, and put that file on the clipboard (as Explorer's Copy).
+    /// history (same position) with the saved file, and put that file on the clipboard
+    /// (as Explorer's Copy).
     fn save_image(&mut self) {
-        if self.items.first().is_none_or(|it| it.preview.kind != Kind::Image) {
+        let i = self.cur;
+        if self.items.get(i).is_none_or(|it| it.preview.kind != Kind::Image) {
             return;
         }
-        let Some(p) = self.payload(0) else { return };
+        let Some(p) = self.payload(i) else { return };
         let path = match imagesave::save_png(&p, &imagesave::target_dir(&self.cfg.pictures_dir)) {
             Ok(path) => path,
             Err(_) => {
@@ -367,9 +392,13 @@ impl App {
                 return;
             }
         };
-        self.items.remove(0);
-        self.add(imagesave::file_payload(&path), "unshufflz.exe".into());
-        if let Some(p) = self.items.first().and_then(|it| it.payload.clone()) {
+        let fp = imagesave::file_payload(&path);
+        let (id, key) = (history::full_hash(&fp), history::content_key(&fp));
+        let item = self.new_item(id, key, fp, "unshufflz.exe".into());
+        let p = item.payload.clone();
+        self.items[i] = item;
+        self.save_index();
+        if let Some(p) = p {
             if clip::restore(self.hwnd, &p) {
                 self.ignore_seq = unsafe { GetClipboardSequenceNumber() };
             }
@@ -380,8 +409,8 @@ impl App {
         if self.visible {
             return;
         }
-        self.sel = 0;
-        self.scroll = 0;
+        self.sel = self.cur.min(self.items.len().saturating_sub(1));
+        self.scroll = history::keep_visible(self.sel, 0, paint::LIST_ROWS);
         unsafe {
             let mut pt = std::mem::zeroed();
             GetCursorPos(&mut pt);
@@ -547,6 +576,7 @@ impl App {
         self.cfg = cfg;
         if self.items.len() > max_items {
             self.items.truncate(max_items);
+            self.cur = self.cur.min(max_items - 1);
             self.save_index(); // the writer then deletes the dropped item files
         }
         let _ = config::save(&self.cfg);
@@ -570,6 +600,7 @@ impl App {
             tray::ID_SETTINGS => settings::open(self.cfg.clone()),
             tray::ID_CLEAR => {
                 self.items.clear();
+                self.cur = 0;
                 self.sel = 0;
                 self.save_index();
             }
@@ -630,7 +661,7 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             match wp {
                 TIMER_CAPTURE => {
                     KillTimer(h, TIMER_CAPTURE);
-                    if with_app(|a| a.on_clipboard()).is_none() {
+                    if with_app(|a| a.on_clipboard(false)).is_none() {
                         SetTimer(h, TIMER_CAPTURE, 80, None);
                     }
                 }

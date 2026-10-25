@@ -11,7 +11,8 @@ Current version: **0.3.0**. The version lives in the root `Cargo.toml`. The inst
 - Show them in an **overlay** on the right (or left) side of the screen while **Win** is held.
 - Win+V = 1 step back (older), Win+C = 1 step forward (newer). Releasing Win puts the selected item on the clipboard. There is no automatic paste.
 - Win+S = when the current item is an image: save it as PNG to `Pictures\Clipboard`, and replace it (history and clipboard) with the saved file.
-- Win+B = delete the highlighted item. Deleting the current clipboard item puts the next older one on the clipboard, so "Ctrl+V, Win+B" pastes copied items newest first.
+- Win+B = delete the highlighted item. Deleting the current clipboard item puts the next older one on the clipboard.
+- Choosing an item does not reorder the list; the overlay opens on the current clipboard item. So "Ctrl+V, Win+V" repeated pastes copied items newest first (and "Ctrl+V, Win+B" does too, deleting them).
 - At most 10 list rows are visible. Longer histories scroll with the selection, without a scrollbar.
 - A **settings window** from the tray: width, side, history size.
 - Use very little memory and CPU. No browser engine, no JS, no .NET runtime.
@@ -234,54 +235,55 @@ Payload = Vec<Fmt>
 Item { id: u64, key: u64, time: u64 (unix s), source: String, size: u64,
        payload: Option<Arc<Payload>>, preview: Preview }
 RAM_LIMIT = 1 MiB; capacity = Config.max_items (1..100)
-App { …, sel: usize, scroll: usize, … }
+App { …, cur: usize, sel: usize, scroll: usize, … }
 ```
 
 - `full_hash` (→ `id`): xxh3 over every format: id as u32 LE (or the name bytes for registered formats), data length as u64 LE, data.
 - `content_key` (→ `key`): the same hash over one main format, the first found of CF_HDROP, CF_DIBV5, CF_DIB, CF_UNICODETEXT. If none exist, it equals `full_hash`.
+- `cur` = index of the item that is on the clipboard now. Choosing an item in the overlay does **not** reorder the list; it only moves `cur`. So "Ctrl+V, Win+V" repeated pastes the history newest first (D, C, B, A). `cur` is not saved; at startup it is found again from the clipboard (see Add). Every list change keeps `cur` pointing at the same item (or clamps it to `len−1`). The Win+S image flag uses item `cur`.
 
 Operations:
 - **Add**:
-  1. Same `id` as the newest item → ignore.
-  2. Otherwise remove every item with the same `key`.
-  3. Build the preview, send the item to the writer, insert it at position 0 with time = now.
-  4. **Cut the list to `max_items`**.
-  5. sel = 0, send the index to the writer, repaint if visible.
+  1. Same `id` as item `cur` → ignore.
+  2. At startup only (the first capture after load): if any item has the same `id`, set `cur` to it and stop (the order is kept across restarts).
+  3. Otherwise remove every item with the same `key`.
+  4. Build the preview, send the item to the writer, insert it at position 0 with time = now.
+  5. **Cut the list to `max_items`**.
+  6. cur = 0, sel = 0, send the index to the writer, repaint if visible.
 - **Saved**: if size > RAM_LIMIT, drop the payload from RAM.
-- **Select / commit** of item `i` > 0:
-  1. Get the payload from RAM or from disk. If that fails: beep, remove the item, save the index.
+- **Select / commit** of item `i` ≠ `cur`:
+  1. Get the payload from RAM or from disk. If that fails: beep, remove the item (fix `cur`), save the index.
   2. Restore it to the clipboard.
-  3. Move the item to position 0 (its time is unchanged). Drop a large payload again.
-  4. Save the index.
+  3. `cur = i`. The list order and the item's time are unchanged. Update the Win+S image flag.
 - **Delete** (`delete(i)`, Win+B, i = sel):
   1. Remove item `i`.
-  2. If `i == 0`, the deleted item was the clipboard content:
-     - if items remain, restore the new item 0 (payload from RAM or disk; an unreadable item is dropped and the next one is tried);
+  2. If `i < cur`: cur − 1. If `i == cur`, the deleted item was the clipboard content:
+     - `cur = min(cur, len−1)`, so the next older item (or the newer one if the oldest was deleted);
+     - if items remain, restore item `cur` (payload from RAM or disk; an unreadable item is dropped and the next one is tried);
      - if none remain, empty the clipboard (`clip::clear`).
      
      Either way, save `ignore_seq`.
-  3. If `i > 0`, the clipboard is not touched.
+  3. If `i ≠ cur`, the clipboard is not touched.
   4. Set `sel = min(sel, len−1)` (0 if empty) and save the index. The writer then deletes the item's file.
 - **Save image** (`save_image`, Win+S):
-  1. Only if item 0 is of kind Image; get its payload (RAM or disk).
+  1. Only if item `cur` is of kind Image; get its payload (RAM or disk).
   2. `imagesave::save_png(payload, target_dir(cfg.pictures_dir))`. On failure: `MessageBeep(MB_ICONWARNING)`, nothing else changes.
-  3. Remove item 0 (its file is deleted by the next cleanup).
-  4. `add(file_payload(path), "unshufflz.exe")`.
-  5. Restore the new item 0 to the clipboard and save `ignore_seq`.
-- **Clear**: empty the list, save an empty index.
+  3. Build a new item from `file_payload(path)` (source `unshufflz.exe`, time = now, sent to the writer) and put it **in place of** item `cur` (same position). The old file is deleted by the next cleanup. Save the index.
+  4. Restore the new item to the clipboard and save `ignore_seq`.
+- **Clear**: empty the list, cur = 0, save an empty index.
 - **Apply settings** (`apply_settings(new_config)`; the settings window passes a full `Config`):
   1. Pass `hold_ms` to the hook (`hook::set_hold_ms`) and replace the config.
-  2. If the list is longer than `max_items`, cut it and save the index (the writer deletes the dropped files).
+  2. If the list is longer than `max_items`, cut it, clamp `cur` to `max_items−1`, and save the index (the writer deletes the dropped files).
   3. Save the INI.
   4. If the width changed: recompute the thumbnail width and rebuild the previews of image items, from the payload in RAM or read from disk.
 
 Selection and scrolling:
-- **SHOW**: if hidden, sel = 0 and scroll = 0.
+- **SHOW**: if hidden, sel = cur and scroll = `keep_visible(cur, 0, LIST_ROWS)`.
 - **PREV**: sel+1, limited to len−1. **NEXT**: sel−1, limited to 0. After either: `scroll = keep_visible(sel, scroll, LIST_ROWS)`.
-- **COMMIT**: if `0 < sel < len`, select the item; then sel = 0. **CANCEL**: hide, sel = 0.
+- **COMMIT**: hide; if `sel ≠ cur` and `sel < len`, select the item. **CANCEL**: hide.
 - **TAP**: like CANCEL, except in ShowWithStart mode (below).
 - **DELETE**: show if hidden, `delete(sel)`, then `keep_visible`, repaint.
-- **SAVE**: show if hidden, `save_image()`, sel = 0, scroll = 0, repaint.
+- **SAVE**: show if hidden, `save_image()`, sel = cur, `keep_visible`, repaint.
 - **ShowWithStart mode** (`Config.show_with_start`): the overlay is also shown while the Start menu is open.
   - `is_start_menu(hwnd)`: the window's process (`util::window_exe_name`) is `StartMenuExperienceHost.exe` (Windows 10 / older 11) or `SearchHost.exe` (newer Windows 11, where Start and Search share a process; checked on 26200: the open Start menu's foreground window belongs to SearchHost). Case-insensitive.
   - `on_foreground(hwnd)`:
