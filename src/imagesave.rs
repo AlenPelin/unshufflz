@@ -259,6 +259,12 @@ pub fn save_png(p: &Payload, dir: &Path) -> io::Result<PathBuf> {
     Err(io::Error::new(io::ErrorKind::AlreadyExists, "too many files this second"))
 }
 
+/// Win+S on copied files: their paths as text, one per line (a single file gives just its path).
+pub fn paths_payload(paths: &[String]) -> Payload {
+    let data = paths.join("\r\n").encode_utf16().chain([0]).flat_map(|c| c.to_le_bytes()).collect();
+    vec![Fmt { id: crate::clip::CF_UNICODETEXT, name: String::new(), data }]
+}
+
 /// Clipboard payload for "copied file" (as Explorer's Copy): CF_HDROP + Preferred DropEffect = copy.
 pub fn file_payload(path: &Path) -> Payload {
     let mut d = vec![0u8; 20];
@@ -370,6 +376,16 @@ mod tests {
         enc.write_header().unwrap().write_image_data(&[7]).unwrap();
         assert_eq!(png_to_rgba(&g).unwrap(), (1, 1, vec![7, 7, 7, 255]));
         assert!(png_to_dibv5(b"not a png").is_none());
+    }
+
+    #[test]
+    fn paths_as_text() {
+        let text = |p: &Payload| String::from_utf16_lossy(&p[0].data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>());
+        let one = paths_payload(&[r"C:\a b\x.txt".to_string()]);
+        assert_eq!(one[0].id, crate::clip::CF_UNICODETEXT);
+        assert_eq!(text(&one), "C:\\a b\\x.txt\0");
+        let two = paths_payload(&[r"C:\a".to_string(), r"D:\b".to_string()]);
+        assert_eq!(text(&two), "C:\\a\r\nD:\\b\0");
     }
 
     #[test]

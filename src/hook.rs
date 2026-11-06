@@ -63,7 +63,7 @@ pub struct St {
     pub win: u32,
     /// Held modifiers: 1 Shift, 2 Ctrl, 4 Alt.
     pub mods: u8,
-    /// The current clipboard item is an image (Win+S is only taken then).
+    /// The current clipboard item is an image or files (Win+S is only taken then).
     pub image: bool,
     /// Time of the current event (KBDLLHOOKSTRUCT.time, ms).
     pub now: u32,
@@ -160,7 +160,7 @@ pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
     if is_win(vk) || is_modifier(vk) || s.phase == Phase::Passthrough {
         return o;
     }
-    // Win+S only when an image is on the clipboard and no modifier is held,
+    // Win+S only when an image or files are on the clipboard (`image` flag) and no modifier is held,
     // so Windows Search and Win+Shift+S (snipping) keep working otherwise.
     let save = vk == VK_S && s.image && s.mods == 0;
     if vk == VK_C || vk == VK_V || vk == VK_B || save {

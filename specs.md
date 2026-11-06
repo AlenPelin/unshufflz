@@ -10,7 +10,7 @@ Current version: **0.3.1**. The version lives in the root `Cargo.toml`. The inst
 - Keep the last **N** clipboard items (default 10, settable 1–100) of any kind: text, rich text, images, files, app-specific formats.
 - Show them in an **overlay** on the right (or left) side of the screen while **Win** is held.
 - Win+V = 1 step back (older), Win+C = 1 step forward (newer). Releasing Win puts the selected item on the clipboard. There is no automatic paste.
-- Win+S = when the current item is an image: save it as PNG to `Pictures\Clipboard`, and replace it (history and clipboard) with the saved file.
+- Win+S = when the current item is an image: save it as PNG to `Pictures\Clipboard`, and replace it (history and clipboard) with the saved file. When the current item is files: replace it with their path(s) as text, one per line.
 - Win+B = delete the highlighted item. Deleting the current clipboard item puts the next older one on the clipboard.
 - Choosing an item does not reorder the list; the overlay opens on the current clipboard item. So "Ctrl+V, Win+V" repeated pastes copied items newest first (and "Ctrl+V, Win+B" does too, deleting them).
 - A new copy goes in at the position of the current clipboard item, which moves one down. After choosing item 3, the next copy becomes item 3 and the old item 3 becomes item 4.
@@ -271,9 +271,9 @@ Operations:
   3. If `i ≠ cur`, the clipboard is not touched.
   4. Set `sel = min(sel, len−1)` (0 if empty) and save the index. The writer then deletes the item's file.
 - **Save image** (`save_image`, Win+S):
-  1. Only if item `cur` is of kind Image; get its payload (RAM or disk).
-  2. `imagesave::save_png(payload, target_dir(cfg.pictures_dir))`. On failure: `MessageBeep(MB_ICONWARNING)`, nothing else changes.
-  3. Build a new item from `file_payload(path)` (source `unshufflz.exe`, time = now, sent to the writer) and put it **in place of** item `cur` (same position). The old file is deleted by the next cleanup. Save the index.
+  1. Only if item `cur` is of kind Image or Files; get its payload (RAM or disk).
+  2. Image: `imagesave::save_png(payload, target_dir(cfg.pictures_dir))`, new payload = `file_payload(path)`. Files: new payload = `paths_payload(parse_hdrop(CF_HDROP))` = CF_UNICODETEXT with the paths joined by CRLF. On failure (PNG not saved, no paths): `MessageBeep(MB_ICONWARNING)`, nothing else changes.
+  3. Build a new item from the new payload (source `unshufflz.exe`, time = now, sent to the writer) and put it **in place of** item `cur` (same position). The old file is deleted by the next cleanup. Save the index.
   4. Restore the new item to the clipboard and save `ignore_seq`.
 - **Clear**: empty the list, cur = 0, save an empty index.
 - **Apply settings** (`apply_settings(new_config)`; the settings window passes a full `Config`):
@@ -757,7 +757,7 @@ Not yet checked by hand:
 
 ## 19. Known limits
 
-- Win+V / Win+C / Win+B system shortcuts are replaced while Win is held; Win+S (Search) only while the current item is an image.
+- Win+V / Win+C / Win+B system shortcuts are replaced while Win is held; Win+S (Search) only while the current item is an image or files.
 - Win+S works on the current clipboard item only, not on the item highlighted in the overlay.
 - Admin windows give no keys to the hook unless the app runs as admin.
 - Stored data is not encrypted.

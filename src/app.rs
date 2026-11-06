@@ -286,8 +286,9 @@ impl App {
         self.update_image_flag();
     }
 
+    /// Win+S is taken by the hook only when it applies: the current item is an image or files.
     fn update_image_flag(&self) {
-        hook::set_image_on_clipboard(self.items.get(self.cur).is_some_and(|it| it.preview.kind == Kind::Image));
+        hook::set_image_on_clipboard(self.items.get(self.cur).is_some_and(|it| matches!(it.preview.kind, Kind::Image | Kind::Files)));
     }
 
     fn on_saved(&mut self, id: u64) {
@@ -449,23 +450,35 @@ impl App {
         self.save_index();
     }
 
-    /// Win+S: save the current (image) item to Pictures\Clipboard as PNG, replace it in
-    /// history (same position) with the saved file, and put that file on the clipboard
-    /// (as Explorer's Copy).
+    /// Win+S on the current item:
+    /// - image: save it to Pictures\Clipboard as PNG and replace it with the saved file
+    ///   (as Explorer's Copy);
+    /// - files: replace them with their path as text (one path per line).
+    ///
+    /// The new item takes the same history position and goes on the clipboard.
     fn save_image(&mut self) {
         let i = self.cur;
-        if self.items.get(i).is_none_or(|it| it.preview.kind != Kind::Image) {
+        let Some(kind) = self.items.get(i).map(|it| it.preview.kind) else { return };
+        if kind != Kind::Image && kind != Kind::Files {
             return;
         }
         let Some(p) = self.payload(i) else { return };
-        let path = match imagesave::save_png(&p, &imagesave::target_dir(&self.cfg.pictures_dir)) {
-            Ok(path) => path,
-            Err(_) => {
+        let fp = if kind == Kind::Files {
+            let hdrop = p.iter().find(|f| f.id == clip::CF_HDROP).map(|f| preview::parse_hdrop(&f.data)).unwrap_or_default();
+            if hdrop.is_empty() {
                 unsafe { MessageBeep(MB_ICONWARNING) };
                 return;
             }
+            imagesave::paths_payload(&hdrop)
+        } else {
+            match imagesave::save_png(&p, &imagesave::target_dir(&self.cfg.pictures_dir)) {
+                Ok(path) => imagesave::file_payload(&path),
+                Err(_) => {
+                    unsafe { MessageBeep(MB_ICONWARNING) };
+                    return;
+                }
+            }
         };
-        let fp = imagesave::file_payload(&path);
         let (id, key) = (history::full_hash(&fp), history::content_key(&fp));
         let item = self.new_item(id, key, fp, "unshufflz.exe".into());
         let p = item.payload.clone();
