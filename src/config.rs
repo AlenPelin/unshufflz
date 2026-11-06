@@ -1,6 +1,6 @@
 /// Settings in `%LOCALAPPDATA%\Unshufflz\unshufflz.ini` (all keys optional):
 ///   HoldDelayMs=0   WidthPercent=15   Position=right   MaxItems=10   MaxItemMB=200   PicturesDir=
-///   ShowWithStart=0   Animation=1   AnimationMs=50
+///   ShowWithStart=0   Animation=1   AnimationMs=50   MousePaste=0
 /// The settings window rewrites this file.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Side {
@@ -23,6 +23,8 @@ pub struct Config {
     pub anim_on: bool,
     /// Slide-in duration (kept when the animation is turned off); 0 = no animation.
     pub anim_ms: u32,
+    /// Mouse clicks while Win is held: left = paste, right = paste + delete.
+    pub mouse_paste: bool,
 }
 
 impl Config {
@@ -34,7 +36,7 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { hold_ms: 0, width_pct: 15, side: Side::Right, max_items: 10, max_item_bytes: 200 << 20, pictures_dir: String::new(), show_with_start: false, anim_on: true, anim_ms: 50 }
+        Config { hold_ms: 0, width_pct: 15, side: Side::Right, max_items: 10, max_item_bytes: 200 << 20, pictures_dir: String::new(), show_with_start: false, anim_on: true, anim_ms: 50, mouse_paste: false }
     }
 }
 
@@ -63,6 +65,7 @@ pub fn parse(text: &str) -> Config {
             ("showwithstart", Some(n)) => c.show_with_start = n != 0,
             ("animation", Some(n)) => c.anim_on = n != 0,
             ("animationms", Some(n)) => c.anim_ms = n.min(1000) as u32,
+            ("mousepaste", Some(n)) => c.mouse_paste = n != 0,
             ("position", _) if v.eq_ignore_ascii_case("left") => c.side = Side::Left,
             ("position", _) if v.eq_ignore_ascii_case("right") => c.side = Side::Right,
             _ => {}
@@ -73,7 +76,7 @@ pub fn parse(text: &str) -> Config {
 
 pub fn format(c: &Config) -> String {
     format!(
-        "[General]\r\nHoldDelayMs={}\r\nWidthPercent={}\r\nPosition={}\r\nMaxItems={}\r\nMaxItemMB={}\r\nPicturesDir={}\r\nShowWithStart={}\r\nAnimation={}\r\nAnimationMs={}\r\n",
+        "[General]\r\nHoldDelayMs={}\r\nWidthPercent={}\r\nPosition={}\r\nMaxItems={}\r\nMaxItemMB={}\r\nPicturesDir={}\r\nShowWithStart={}\r\nAnimation={}\r\nAnimationMs={}\r\nMousePaste={}\r\n",
         c.hold_ms,
         c.width_pct,
         if c.side == Side::Left { "left" } else { "right" },
@@ -82,7 +85,8 @@ pub fn format(c: &Config) -> String {
         c.pictures_dir,
         c.show_with_start as u8,
         c.anim_on as u8,
-        c.anim_ms
+        c.anim_ms,
+        c.mouse_paste as u8
     )
 }
 
@@ -115,7 +119,7 @@ mod tests {
 
     #[test]
     fn format_roundtrip() {
-        let c = Config { hold_ms: 300, width_pct: 22, side: Side::Left, max_items: 42, max_item_bytes: 7 << 20, pictures_dir: r"D:\My Shots=1\x".into(), show_with_start: true, anim_on: false, anim_ms: 120 };
+        let c = Config { hold_ms: 300, width_pct: 22, side: Side::Left, max_items: 42, max_item_bytes: 7 << 20, pictures_dir: r"D:\My Shots=1\x".into(), show_with_start: true, anim_on: false, anim_ms: 120, mouse_paste: true };
         assert_eq!(parse(&format(&c)), c);
         assert_eq!(parse("PicturesDir=").pictures_dir, "");
         assert!(parse("ShowWithStart=1").show_with_start);
@@ -131,5 +135,7 @@ mod tests {
         assert_eq!(c.slide_ms(), 200);
         assert!(parse("").anim_on);
         assert_eq!(parse("picturesdir =  C:\\a b  ").pictures_dir, "C:\\a b");
+        assert!(!parse("").mouse_paste);
+        assert!(parse("MousePaste=1").mouse_paste);
     }
 }

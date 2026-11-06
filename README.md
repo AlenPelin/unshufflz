@@ -53,6 +53,8 @@ The app runs in the background and adds a tray icon.
 | Hold Win + **V** | Go 1 step back in history (older item) |
 | Hold Win + **C** | Go 1 step forward in history (newer item) |
 | Hold Win, **mouse wheel** (anywhere) | Wheel down = older item (like V), wheel up = newer item (like C) |
+| Hold Win, **left click** (setting "Mouse with Win held", off by default) | Paste the selected item into the active app (like releasing Win and pressing Ctrl+V). The overlay stays, so you can scroll and click again. |
+| Hold Win, **right click** (same setting) | Paste the selected item, then delete it from history (like Ctrl+V, Win+B). The next older item is selected, so repeated right clicks paste a stack of items and use them up. |
 | Hold Win + **B** | Delete the highlighted item from history (and disk). If it was the current clipboard item, the next older item goes on the clipboard right away (or the clipboard is emptied if nothing is left). Press B again to delete more. |
 | Release **Win** | The selected item becomes the clipboard content. It stays at its place in the list (the order does not change), and the next time the overlay opens on it. If you did not move, the clipboard stays as it is. Nothing is pasted automatically, so press Ctrl+V yourself. |
 | Hold Win + **S** (current item is an image) | Save the image as PNG to `Pictures\Clipboard\Unshufflz_yyyyMMdd_HHmmss.png` (the folder can be changed in Settings). In history and on the clipboard, the image is replaced by the saved file, as if you had copied it in Explorer, so Ctrl+V pastes the file. If the current item is not an image, or Shift/Ctrl/Alt is held, Win+S does its normal Windows thing (Search; Win+Shift+S = snipping). |
@@ -91,6 +93,7 @@ The **Settings** window (tray menu → Settings…) has:
 | Items to keep in history | 1–100 | 10 |
 | Show delay when holding Win | 0–2000 ms | 0 (instant) |
 | Also show while the Start menu is open | on / off | off |
+| Mouse with Win held: left click = paste, right = paste + delete | on / off | off |
 | Save pictures (Win+S) to folder | any full folder path; **Browse…** opens the Windows folder picker | empty = `Pictures\Clipboard` (shown as a grey hint) |
 | Position | Right side / Left side of the screen | Right |
 
@@ -111,6 +114,7 @@ MaxItemMB=200     ; 1..2048   clipboard content bigger than this is not stored
 PicturesDir=      ; folder for Win+S pictures; empty = Pictures\Clipboard
 ShowWithStart=0   ; 1 = also show the overlay while the Start menu is open
 AnimationMs=50    ; 0..1000   slide-in duration; 0 = appear without animation
+MousePaste=0      ; 1 = left click with Win held pastes, right click pastes and deletes
 ```
 
 ## Where data is stored

@@ -22,6 +22,10 @@ pub const A_DELETE: usize = 6;
 pub const A_SAVE: usize = 7;
 /// Quick Win tap: the Start menu is about to open (or close).
 pub const A_TAP: usize = 8;
+/// Left click with Win held: paste the selected item.
+pub const A_PASTE: usize = 9;
+/// Right click with Win held: paste the selected item, then delete it.
+pub const A_PASTE_DELETE: usize = 10;
 
 /// dwExtraInfo of our injected keys, so the hook ignores them.
 const MARK: usize = 0x434C_4950;
@@ -220,6 +224,17 @@ pub fn wheel(s: &mut St, acc: &mut i32, delta: i32) -> Vec<usize> {
     posts
 }
 
+/// Mouse click while the overlay is shown and Win is held (MousePaste on): left = paste the
+/// selected item (A_PASTE), right = paste it and delete it (A_PASTE_DELETE). None (click
+/// passes) unless Win is held with the overlay up.
+pub fn click(s: &mut St, right: bool) -> Option<usize> {
+    if s.phase != Phase::Shown {
+        return None;
+    }
+    s.acted = true; // releasing Win then commits, it is not a tap
+    Some(if right { A_PASTE_DELETE } else { A_PASTE })
+}
+
 /// Hold delay elapsed.
 pub fn on_hold(s: &mut St) -> Option<usize> {
     if s.phase == Phase::Armed {
@@ -239,16 +254,27 @@ pub fn set_image_on_clipboard(on: bool) {
 static HOLD_MS: AtomicU32 = AtomicU32::new(250);
 /// The overlay is visible: the mouse wheel walks the history.
 static VISIBLE: AtomicBool = AtomicBool::new(false);
+/// MousePaste setting: clicks while Win is held paste (left) or paste + delete (right).
+static MOUSE_PASTE: AtomicBool = AtomicBool::new(false);
+/// The held Win key (VK_LWIN / VK_RWIN), for `inject_paste`.
+static WIN_VK: AtomicU32 = AtomicU32::new(0);
 
 /// Called by the main thread when the overlay is shown or hidden.
 pub fn set_overlay_visible(on: bool) {
     VISIBLE.store(on, Ordering::Relaxed);
 }
 
+/// MousePaste setting (startup and settings window).
+pub fn set_mouse_paste(on: bool) {
+    MOUSE_PASTE.store(on, Ordering::Relaxed);
+}
+
 thread_local! {
     static ST: RefCell<St> = const { RefCell::new(St::new()) };
     static TIMER: RefCell<usize> = const { RefCell::new(0) };
     static WHEEL: RefCell<i32> = const { RefCell::new(0) };
+    /// A button-down was swallowed as a paste click: swallow its up too ([left, right]).
+    static SWALLOW_UP: RefCell<[bool; 2]> = const { RefCell::new([false; 2]) };
 }
 
 /// Change the hold delay (settings window).
@@ -275,19 +301,42 @@ pub fn start(main: HWND, hold_ms: u32) {
 }
 
 /// While the overlay is visible, the wheel (anywhere on screen) walks the history and the
-/// wheel event is swallowed. Everything else passes at once (this runs for every mouse
-/// move system-wide).
+/// wheel event is swallowed. With MousePaste on, left/right clicks while Win is held paste
+/// (see `click`); the click and its button-up are swallowed. Everything else passes at
+/// once (this runs for every mouse move system-wide).
 unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 && wp as u32 == WM_MOUSEWHEEL {
+    if code == HC_ACTION as i32 {
         let m = &*(lp as *const MSLLHOOKSTRUCT);
-        if VISIBLE.load(Ordering::Relaxed) {
-            let delta = (m.mouseData >> 16) as u16 as i16 as i32;
-            let posts = ST.with(|s| WHEEL.with(|acc| wheel(&mut s.borrow_mut(), &mut acc.borrow_mut(), delta)));
-            crate::util::debug(|| format!("hook wheel delta={} {:?}", delta, posts));
-            for a in posts {
-                post(a);
+        match wp as u32 {
+            WM_MOUSEWHEEL if VISIBLE.load(Ordering::Relaxed) => {
+                let delta = (m.mouseData >> 16) as u16 as i16 as i32;
+                let posts = ST.with(|s| WHEEL.with(|acc| wheel(&mut s.borrow_mut(), &mut acc.borrow_mut(), delta)));
+                crate::util::debug(|| format!("hook wheel delta={} {:?}", delta, posts));
+                for a in posts {
+                    post(a);
+                }
+                return 1;
             }
-            return 1;
+            b @ (WM_LBUTTONDOWN | WM_RBUTTONDOWN) if MOUSE_PASTE.load(Ordering::Relaxed) && VISIBLE.load(Ordering::Relaxed) => {
+                // A press on the overlay itself (file panel drag) is not a paste.
+                let on_overlay = WindowFromPoint(m.pt) as isize == MAIN.load(Ordering::Relaxed);
+                let right = b == WM_RBUTTONDOWN;
+                if !on_overlay {
+                    if let Some(a) = ST.with(|s| click(&mut s.borrow_mut(), right)) {
+                        crate::util::debug(|| format!("hook click right={} -> {}", right, a));
+                        SWALLOW_UP.with(|u| u.borrow_mut()[right as usize] = true);
+                        post(a);
+                        return 1;
+                    }
+                }
+            }
+            b @ (WM_LBUTTONUP | WM_RBUTTONUP) => {
+                let i = (b == WM_RBUTTONUP) as usize;
+                if SWALLOW_UP.with(|u| std::mem::take(&mut u.borrow_mut()[i])) {
+                    return 1;
+                }
+            }
+            _ => {}
         }
     }
     CallNextHookEx(null_mut(), code, wp, lp)
@@ -334,6 +383,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let win = s.win;
                 let before = s.phase;
                 let o = step(&mut s, k.vkCode, down);
+                WIN_VK.store(s.win, Ordering::Relaxed);
                 // Only keys that matter to us: never log normal typing.
                 if before != Phase::Idle || s.phase != Phase::Idle {
                     crate::util::debug(|| format!("hook vk={:#x} {} event_time={} flags={:#x} {:?}->{:?} {:?}", k.vkCode, if down { "down" } else { "up" }, k.time, k.flags, before, s.phase, o));
@@ -374,6 +424,32 @@ unsafe fn inject_release(win: u16) {
     };
     let inputs = [key(VK_MASK, 0), key(VK_MASK, KEYEVENTF_KEYUP), key(win, KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY)];
     SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+}
+
+/// Paste into the foreground app while Win is held (mouse click, see `click`): release
+/// Win (masked, so Start does not open), Ctrl+V, then press Win again so the state
+/// matches the held key. Called by the main thread after the item is on the clipboard.
+pub fn inject_paste() {
+    let win = WIN_VK.load(Ordering::Relaxed) as u16;
+    if win == 0 {
+        return;
+    }
+    let key = |vk: u16, flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: MARK } },
+    };
+    let ext = KEYEVENTF_EXTENDEDKEY;
+    let inputs = [
+        key(VK_MASK, 0),
+        key(VK_MASK, KEYEVENTF_KEYUP),
+        key(win, KEYEVENTF_KEYUP | ext),
+        key(VK_CONTROL, 0),
+        key(VK_V as u16, 0),
+        key(VK_V as u16, KEYEVENTF_KEYUP),
+        key(VK_CONTROL, KEYEVENTF_KEYUP),
+        key(win, ext),
+    ];
+    unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
 }
 
 #[cfg(test)]
@@ -425,6 +501,22 @@ mod tests {
         assert!(wheel(&mut s, &mut acc, 100).is_empty());
         assert!(wheel(&mut s, &mut acc, -100).is_empty());
         assert_eq!(acc, -100);
+    }
+
+    #[test]
+    fn click_pastes_only_while_win_held_with_overlay() {
+        let mut s = st();
+        assert_eq!(click(&mut s, false), None); // Idle: click passes
+        s.now = 1000;
+        step(&mut s, VK_LWIN_, true);
+        assert_eq!(click(&mut s, false), None); // Armed, overlay not up yet
+        on_hold(&mut s);
+        assert_eq!(click(&mut s, false), Some(A_PASTE));
+        assert_eq!(click(&mut s, true), Some(A_PASTE_DELETE));
+        // a click counts as an action: a quick release commits, Start does not open
+        s.now = 1100;
+        assert_eq!(step(&mut s, VK_LWIN_, false).posts, vec![A_COMMIT]);
+        assert_eq!(click(&mut s, true), None);
     }
 
     #[test]

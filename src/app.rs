@@ -2,7 +2,7 @@ use crate::clip::{self, Payload};
 use crate::config::{self, Config, Side};
 use crate::drag;
 use crate::history::{self, Item, RAM_LIMIT};
-use crate::hook::{self, A_CANCEL, A_COMMIT, A_DELETE, A_NEXT, A_PREV, A_SAVE, A_SHOW, A_TAP, WM_APP_HOOK};
+use crate::hook::{self, A_CANCEL, A_COMMIT, A_DELETE, A_NEXT, A_PASTE, A_PASTE_DELETE, A_PREV, A_SAVE, A_SHOW, A_TAP, WM_APP_HOOK};
 use crate::imagesave;
 use crate::paint::{self, Fonts};
 use crate::preview::{self, Kind};
@@ -42,6 +42,9 @@ const CAPTURE_WAIT_MS: u32 = 300;
 /// After a PNG-only capture: check again this late if the clipboard lost its bitmap.
 const TIMER_REPAIR: usize = 4;
 const REPAIR_WAIT_MS: u32 = 2000;
+/// Right-click paste: delete the pasted item this late, after the app has read it.
+const TIMER_PASTE_DELETE: usize = 5;
+const PASTE_DELETE_MS: u32 = 300;
 /// Processes that own the open Start menu: StartMenuExperienceHost on Windows 10 and
 /// older Windows 11, SearchHost on newer Windows 11 (it also hosts the Search panel).
 const START_MENU_EXES: [&str; 2] = ["StartMenuExperienceHost.exe", "SearchHost.exe"];
@@ -71,6 +74,8 @@ pub struct App {
     ignore_seq: u32,
     /// Clipboard sequence number after the last PNG-only capture (see repair()).
     capture_seq: u32,
+    /// Right-click paste: item id to delete when TIMER_PASTE_DELETE fires.
+    pending_delete: Option<u64>,
     store: Store,
     dir: PathBuf,
     thumb_w: i32,
@@ -147,6 +152,7 @@ pub fn run(cfg: Config) {
             visible: false,
             ignore_seq: 0,
             capture_seq: 0,
+            pending_delete: None,
             store: Store::start(dir.clone(), hwnd as isize, WM_APP_SAVED),
             dir,
             thumb_w,
@@ -157,12 +163,13 @@ pub fn run(cfg: Config) {
         app.load();
         app.update_image_flag();
         app.on_clipboard(true); // take what is on the clipboard now
-        let hold = app.cfg.hold_ms;
+        let (hold, mouse_paste) = (app.cfg.hold_ms, app.cfg.mouse_paste);
         APP.with(|a| *a.borrow_mut() = Some(app));
 
         AddClipboardFormatListener(hwnd);
         tray::add(hwnd);
         hook::start(hwnd, hold);
+        hook::set_mouse_paste(mouse_paste);
         // Foreground changes tell us when the Start menu opens or closes.
         SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, null_mut(), Some(on_win_event), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
@@ -341,7 +348,41 @@ impl App {
                 self.delete(self.sel);
                 self.invalidate();
             }
+            A_PASTE | A_PASTE_DELETE => self.paste(a == A_PASTE_DELETE),
             _ => {}
+        }
+    }
+
+    /// Mouse click with Win held (MousePaste): put the selected item on the clipboard and
+    /// paste it (Ctrl+V) into the foreground app; the overlay stays. `delete`: then remove
+    /// it, as Ctrl+V, Win+B does, so the next older item is current. The delete waits
+    /// PASTE_DELETE_MS, so the app reads the clipboard before it changes.
+    fn paste(&mut self, delete: bool) {
+        if !self.visible || self.items.is_empty() || self.pending_delete.is_some() {
+            return;
+        }
+        let i = self.sel.min(self.items.len() - 1);
+        let id = self.items[i].id;
+        if i != self.cur {
+            self.select(i);
+        }
+        if self.items.get(self.cur).is_none_or(|it| it.id != id) {
+            return; // the item could not be read (select() removed it)
+        }
+        hook::inject_paste();
+        if delete {
+            self.pending_delete = Some(id);
+            unsafe { SetTimer(self.hwnd, TIMER_PASTE_DELETE, PASTE_DELETE_MS, None) };
+        }
+        self.invalidate();
+    }
+
+    fn on_paste_delete_timer(&mut self) {
+        let Some(id) = self.pending_delete.take() else { return };
+        if let Some(i) = self.items.iter().position(|it| it.id == id) {
+            self.delete(i);
+            self.sel = self.cur.min(self.items.len().saturating_sub(1));
+            self.invalidate();
         }
     }
 
@@ -606,6 +647,7 @@ impl App {
         let width_changed = cfg.width_pct != self.cfg.width_pct;
         let (width_pct, max_items) = (cfg.width_pct, cfg.max_items);
         hook::set_hold_ms(cfg.hold_ms);
+        hook::set_mouse_paste(cfg.mouse_paste);
         self.cfg = cfg;
         if self.items.len() > max_items {
             self.items.truncate(max_items);
@@ -702,6 +744,10 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                 TIMER_REPAIR => {
                     KillTimer(h, TIMER_REPAIR);
                     with_app(|a| a.repair());
+                }
+                TIMER_PASTE_DELETE => {
+                    KillTimer(h, TIMER_PASTE_DELETE);
+                    with_app(|a| a.on_paste_delete_timer());
                 }
                 TIMER_WATCH => {
                     with_app(|a| a.watch());
