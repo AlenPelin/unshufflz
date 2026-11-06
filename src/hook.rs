@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
@@ -198,7 +198,7 @@ pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
 /// One wheel notch.
 pub const NOTCH: i32 = 120;
 
-/// Mouse wheel over the visible overlay → actions: down = older (PREV), up = newer (NEXT),
+/// Mouse wheel while the overlay is visible → actions: down = older (PREV), up = newer (NEXT),
 /// one per notch. Smaller deltas (smooth wheels) add up in `acc`.
 pub fn wheel(s: &mut St, acc: &mut i32, delta: i32) -> Vec<usize> {
     if s.phase == Phase::Shown {
@@ -237,20 +237,12 @@ pub fn set_image_on_clipboard(on: bool) {
     IMAGE.store(on, Ordering::Relaxed);
 }
 static HOLD_MS: AtomicU32 = AtomicU32::new(250);
-/// Screen rect of the visible overlay (left, top, right, bottom); right == left when hidden.
-static OVERLAY: [AtomicI32; 4] = [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)];
+/// The overlay is visible: the mouse wheel walks the history.
+static VISIBLE: AtomicBool = AtomicBool::new(false);
 
-/// Called by the main thread when the overlay is shown (x, y, width, height) or hidden.
-pub fn set_overlay_rect(r: Option<(i32, i32, i32, i32)>) {
-    let (x, y, w, h) = r.unwrap_or_default();
-    for (a, v) in OVERLAY.iter().zip([x, y, x + w, y + h]) {
-        a.store(v, Ordering::Relaxed);
-    }
-}
-
-fn over_overlay(pt: POINT) -> bool {
-    let [l, t, r, b] = [0, 1, 2, 3].map(|i| OVERLAY[i].load(Ordering::Relaxed));
-    pt.x >= l && pt.x < r && pt.y >= t && pt.y < b
+/// Called by the main thread when the overlay is shown or hidden.
+pub fn set_overlay_visible(on: bool) {
+    VISIBLE.store(on, Ordering::Relaxed);
 }
 
 thread_local! {
@@ -282,12 +274,13 @@ pub fn start(main: HWND, hold_ms: u32) {
     });
 }
 
-/// Wheel over the visible overlay walks the history; the wheel event is swallowed then.
-/// Everything else passes at once (this runs for every mouse move system-wide).
+/// While the overlay is visible, the wheel (anywhere on screen) walks the history and the
+/// wheel event is swallowed. Everything else passes at once (this runs for every mouse
+/// move system-wide).
 unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 && wp as u32 == WM_MOUSEWHEEL {
         let m = &*(lp as *const MSLLHOOKSTRUCT);
-        if over_overlay(m.pt) {
+        if VISIBLE.load(Ordering::Relaxed) {
             let delta = (m.mouseData >> 16) as u16 as i16 as i32;
             let posts = ST.with(|s| WHEEL.with(|acc| wheel(&mut s.borrow_mut(), &mut acc.borrow_mut(), delta)));
             crate::util::debug(|| format!("hook wheel delta={} {:?}", delta, posts));

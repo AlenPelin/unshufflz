@@ -464,7 +464,7 @@ impl App {
             SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             SetTimer(self.hwnd, TIMER_WATCH, 150, None);
             self.visible = true;
-            hook::set_overlay_rect(Some((x, wa.top, w, h)));
+            hook::set_overlay_visible(true);
             self.update_click_through();
             crate::util::debug(|| "main overlay shown".to_string());
             if animate {
@@ -504,7 +504,7 @@ impl App {
             ShowWindow(self.hwnd, SW_HIDE);
             KillTimer(self.hwnd, TIMER_WATCH);
         }
-        hook::set_overlay_rect(None);
+        hook::set_overlay_visible(false);
         self.visible = false;
     }
 

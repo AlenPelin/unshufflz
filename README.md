@@ -52,7 +52,7 @@ The app runs in the background and adds a tray icon.
 | Hold **Win** | Overlay appears at once with the current clipboard item highlighted, sliding in from the screen edge in 50 ms (Apple-style ease-out). A delay can be set in Settings. |
 | Hold Win + **V** | Go 1 step back in history (older item) |
 | Hold Win + **C** | Go 1 step forward in history (newer item) |
-| Hold Win, **mouse wheel** over the overlay | Wheel down = older item (like V), wheel up = newer item (like C) |
+| Hold Win, **mouse wheel** (anywhere) | Wheel down = older item (like V), wheel up = newer item (like C) |
 | Hold Win + **B** | Delete the highlighted item from history (and disk). If it was the current clipboard item, the next older item goes on the clipboard right away (or the clipboard is emptied if nothing is left). Press B again to delete more. |
 | Release **Win** | The selected item becomes the clipboard content. It stays at its place in the list (the order does not change), and the next time the overlay opens on it. If you did not move, the clipboard stays as it is. Nothing is pasted automatically, so press Ctrl+V yourself. |
 | Hold Win + **S** (current item is an image) | Save the image as PNG to `Pictures\Clipboard\Unshufflz_yyyyMMdd_HHmmss.png` (the folder can be changed in Settings). In history and on the clipboard, the image is replaced by the saved file, as if you had copied it in Explorer, so Ctrl+V pastes the file. If the current item is not an image, or Shift/Ctrl/Alt is held, Win+S does its normal Windows thing (Search; Win+Shift+S = snipping). |

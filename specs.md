@@ -15,7 +15,7 @@ Current version: **0.3.1**. The version lives in the root `Cargo.toml`. The inst
 - Choosing an item does not reorder the list; the overlay opens on the current clipboard item. So "Ctrl+V, Win+V" repeated pastes copied items newest first (and "Ctrl+V, Win+B" does too, deleting them).
 - A new copy goes in at the position of the current clipboard item, which moves one down. After choosing item 3, the next copy becomes item 3 and the old item 3 becomes item 4.
 - The preview takes the top third of the overlay, the list the bottom two thirds. The selected row stays at 2/3 of the height; the list moves around it (no scrollbar).
-- The mouse wheel over the visible overlay also walks the history: down = older (like Win+V), up = newer (like Win+C).
+- While the overlay is visible, the mouse wheel (anywhere on screen) also walks the history: down = older (like Win+V), up = newer (like Win+C).
 - A **settings window** from the tray: width, side, history size.
 - Use very little memory and CPU. No browser engine, no JS, no .NET runtime.
 - Save history to disk **asynchronously** and **crash-safe**. Items that drop out of history are removed from disk too.
@@ -148,7 +148,7 @@ App state lives in a thread-local `RefCell<Option<App>>`. Handlers use `try_borr
 ### 6.2 Hook thread
 
 - `SetWindowsHookExW(WH_KEYBOARD_LL, proc, GetModuleHandleW(NULL), 0)` and `SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, …)`, then a `GetMessageW` loop.
-- **Mouse wheel**: `show()` / `hide()` publish the overlay screen rect (`set_overlay_rect`, atomics; empty when hidden). `mouse_proc` passes every event at once, except `WM_MOUSEWHEEL` with the cursor inside that rect: `wheel(st, acc, delta)` turns it into actions (one per 120 of delta, down = PREV, up = NEXT; partial deltas add up in `acc`, which resets when the direction changes; sets `acted` when Shown, so a quick Win release commits), posts them, and swallows the event.
+- **Mouse wheel**: `show()` / `hide()` set an atomic flag (`set_overlay_visible`). `mouse_proc` passes every event at once, except `WM_MOUSEWHEEL` while the flag is set (the cursor position does not matter): `wheel(st, acc, delta)` turns it into actions (one per 120 of delta, down = PREV, up = NEXT; partial deltas add up in `acc`, which resets when the direction changes; sets `acted` when Shown, so a quick Win release commits), posts them, and swallows the event.
 - The hold timer is a thread timer (`SetTimer(NULL, 0, HoldDelayMs, NULL)`), handled as `WM_TIMER` with hwnd NULL. Only one is active at a time.
 - If `HoldDelayMs` is 0, no timer is used: when `step()` asks to start the timer, the callback runs `on_hold()` at once and posts SHOW. The overlay is visible about 7 ms after Win down (measured).
 - `HoldDelayMs` lives in a global atomic; `hook::set_hold_ms` changes it (settings window).
