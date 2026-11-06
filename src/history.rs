@@ -1,4 +1,4 @@
-use crate::clip::{Payload, CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
+use crate::clip::{is_png, Payload, CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
 use crate::preview::Preview;
 use std::sync::Arc;
 use xxhash_rust::xxh3::Xxh3;
@@ -37,9 +37,12 @@ pub fn full_hash(p: &Payload) -> u64 {
 }
 
 pub fn content_key(p: &Payload) -> u64 {
-    let main = [CF_HDROP, CF_DIBV5, CF_DIB, CF_UNICODETEXT]
+    let by_id = |id: u32| p.iter().find(|f| f.id == id);
+    let main = [CF_HDROP, CF_DIBV5, CF_DIB]
         .iter()
-        .find_map(|&id| p.iter().find(|f| f.id == id));
+        .find_map(|&id| by_id(id))
+        .or_else(|| p.iter().find(|f| is_png(f)))
+        .or_else(|| by_id(CF_UNICODETEXT));
     match main {
         Some(f) => {
             let mut h = Xxh3::new();
@@ -99,6 +102,15 @@ mod tests {
         assert_eq!(keep_visible(14, 5, 10), 5); // still visible, no move
         assert_eq!(keep_visible(4, 5, 10), 4); // one above the top
         assert_eq!(keep_visible(0, 7, 10), 0);
+    }
+
+    #[test]
+    fn png_is_main_content() {
+        let a = vec![f(0xC200, "PNG", b"img"), f(0xC201, "CanIncludeInClipboardHistory", b"\x01\0\0\0")];
+        let b = vec![f(0xC300, "PNG", b"img")];
+        assert_eq!(content_key(&a), content_key(&b));
+        let t = vec![f(CF_UNICODETEXT, "", b"img"), f(0xC300, "PNG", b"img")];
+        assert_eq!(content_key(&t), content_key(&b)); // image wins over text, as a DIB does
     }
 
     #[test]

@@ -81,6 +81,17 @@ pub fn build(p: &Payload, thumb_max_w: i32) -> Preview {
             pv.line = w(&format!("Image {} × {}", iw, ih));
         }
         pv.thumb = make_thumb(d, thumb_max_w);
+    } else if let Some(f) = p.iter().find(|f| is_png(f)) {
+        pv.kind = Kind::Image;
+        pv.info = "Image · PNG".into();
+        pv.line = w("Image");
+        if let Some(d) = crate::imagesave::png_to_dibv5(&f.data) {
+            let iw = i32::from_le_bytes([d[4], d[5], d[6], d[7]]);
+            let ih = i32::from_le_bytes([d[8], d[9], d[10], d[11]]);
+            pv.info = format!("Image · {} × {} · PNG", iw, ih);
+            pv.line = w(&format!("Image {} × {}", iw, ih));
+            pv.thumb = make_thumb(&d, thumb_max_w);
+        }
     } else {
         let total: u64 = p.iter().map(|f| f.data.len() as u64).sum();
         pv.info = format!("Other · {} formats · {}", p.len(), human_size(total));
@@ -421,6 +432,17 @@ mod tests {
         assert!(pv.info.contains("1000 × 500"));
         let t = pv.thumb.expect("thumb");
         assert_eq!((t.w, t.h), (200, 100));
+    }
+
+    #[test]
+    fn png_only_image_has_thumb() {
+        let mut png = Vec::new();
+        crate::imagesave::encode_png(400, 100, &vec![200u8; 400 * 100 * 4], &mut png).unwrap();
+        let pv = build(&vec![Fmt { id: 0xC123, name: "PNG".into(), data: png }], 200);
+        assert!(pv.kind == Kind::Image);
+        assert!(pv.info.contains("400 × 100"), "{}", pv.info);
+        let t = pv.thumb.expect("thumb");
+        assert_eq!((t.w, t.h), (200, 50));
     }
 
     #[test]

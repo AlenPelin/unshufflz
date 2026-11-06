@@ -5,7 +5,7 @@ use windows_sys::Win32::Graphics::Gdi::{DeleteEnhMetaFile, GetEnhMetaFileBits, S
 use windows_sys::Win32::System::DataExchange::*;
 use windows_sys::Win32::System::Memory::*;
 use windows_sys::Win32::System::Threading::Sleep;
-use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow};
 
 pub const CF_TEXT: u32 = 1;
 pub const CF_BITMAP: u32 = 2;
@@ -28,11 +28,12 @@ pub struct Fmt {
 
 pub type Payload = Vec<Fmt>;
 
-/// Registered format ids used for privacy checks.
+/// Registered format ids used for privacy checks, plus "PNG".
 pub struct Formats {
     exclude: u32,
     can_include: u32,
     viewer_ignore: u32,
+    png: u32,
 }
 
 impl Formats {
@@ -42,8 +43,17 @@ impl Formats {
             exclude: r("ExcludeClipboardContentFromMonitorProcessing"),
             can_include: r("CanIncludeInClipboardHistory"),
             viewer_ignore: r("Clipboard Viewer Ignore"),
+            png: r("PNG"),
         }
     }
+}
+
+pub fn is_png(f: &Fmt) -> bool {
+    f.name.eq_ignore_ascii_case("PNG")
+}
+
+pub fn has_dib(p: &Payload) -> bool {
+    p.iter().any(|f| f.id == CF_DIB || f.id == CF_DIBV5)
 }
 
 fn open(hwnd: HWND) -> bool {
@@ -89,43 +99,66 @@ unsafe fn capture_inner(f: &Formats, max_bytes: u64) -> Option<Payload> {
     }
     let has_uni = ids.contains(&CF_UNICODETEXT);
     let has_v5 = ids.contains(&CF_DIBV5);
+    // With a PNG, read only the PNG: the owner (e.g. Snipping Tool) may render every
+    // image format on request, and the clipboard stays open for all that time. Snipping
+    // Tool crashes if it cannot open the clipboard then. restore() makes the DIB.
+    let has_png = ids.contains(&f.png);
     let mut out = Vec::new();
     let mut total = 0u64;
     for &id in &ids {
-        if skip(id, has_uni, has_v5) {
+        if skip(id, has_uni, has_v5, has_png) {
             continue;
         }
-        let name = if id >= 0xC000 { format_name(id) } else { String::new() };
-        if id >= 0xC000 && (name.is_empty() || name == "DataObject" || name == "Ole Private Data") {
-            continue;
-        }
-        let h = GetClipboardData(id);
-        if h.is_null() {
-            continue;
-        }
-        let size = if id == CF_ENHMETAFILE {
-            GetEnhMetaFileBits(h, 0, null_mut()) as u64
-        } else {
-            GlobalSize(h) as u64
-        };
-        total += size;
-        if total > max_bytes {
-            return None;
-        }
-        let data = if id == CF_ENHMETAFILE { read_emf(h) } else { read_global(h) };
-        if let Some(data) = data {
-            out.push(Fmt { id, name, data });
+        read_format(id, &mut out, &mut total, max_bytes)?;
+    }
+    if has_png && !out.iter().any(is_png) {
+        // The PNG could not be read: fall back to the DIB.
+        for id in [CF_DIBV5, CF_DIB] {
+            if ids.contains(&id) && read_format(id, &mut out, &mut total, max_bytes)? {
+                break;
+            }
         }
     }
     if out.is_empty() { None } else { Some(out) }
 }
 
+/// Read format `id` into `out`. Some(true) if read, Some(false) if skipped or empty,
+/// None if the total size goes above `max_bytes`.
+unsafe fn read_format(id: u32, out: &mut Payload, total: &mut u64, max_bytes: u64) -> Option<bool> {
+    let name = if id >= 0xC000 { format_name(id) } else { String::new() };
+    if id >= 0xC000 && (name.is_empty() || name == "DataObject" || name == "Ole Private Data") {
+        return Some(false);
+    }
+    let h = GetClipboardData(id);
+    if h.is_null() {
+        return Some(false);
+    }
+    let size = if id == CF_ENHMETAFILE {
+        GetEnhMetaFileBits(h, 0, null_mut()) as u64
+    } else {
+        GlobalSize(h) as u64
+    };
+    *total += size;
+    if *total > max_bytes {
+        return None;
+    }
+    let data = if id == CF_ENHMETAFILE { read_emf(h) } else { read_global(h) };
+    match data {
+        Some(data) => {
+            out.push(Fmt { id, name, data });
+            Some(true)
+        }
+        None => Some(false),
+    }
+}
+
 /// Formats that are GDI handles, owner-drawn, private, or synthesized by Windows.
-fn skip(id: u32, has_uni: bool, has_v5: bool) -> bool {
+fn skip(id: u32, has_uni: bool, has_v5: bool, has_png: bool) -> bool {
     match id {
         CF_BITMAP | CF_METAFILEPICT | CF_PALETTE => true,
         CF_TEXT | CF_OEMTEXT => has_uni,
-        CF_DIB => has_v5,
+        CF_DIBV5 => has_png,
+        CF_DIB => has_v5 || has_png,
         0x0080..=0x008F => true, // CF_OWNERDISPLAY, CF_DSP*
         0x0200..=0x03FF => true, // CF_PRIVATEFIRST..CF_GDIOBJLAST
         _ => false,
@@ -190,8 +223,26 @@ pub fn clear(hwnd: HWND) -> bool {
     true
 }
 
+/// The clipboard has no usable bitmap although `p` (just captured) has a PNG: no DIB
+/// format is listed, or its owner window is gone, so formats it did not render yet
+/// are lost (e.g. Snipping Tool crashed). Then apps like Paint cannot paste.
+pub fn dib_missing(p: &Payload) -> bool {
+    if !p.iter().any(is_png) || has_dib(p) {
+        return false;
+    }
+    unsafe {
+        let listed = [CF_DIB, CF_DIBV5, CF_BITMAP].iter().any(|&id| IsClipboardFormatAvailable(id) != 0);
+        let owner = GetClipboardOwner();
+        let owner_gone = !owner.is_null() && IsWindow(owner) == 0;
+        !listed || owner_gone
+    }
+}
+
 /// Put a stored payload back on the clipboard. Returns true on success.
+/// A payload with a PNG but no DIB also gets a CF_DIBV5 made from the PNG.
 pub fn restore(hwnd: HWND, p: &Payload) -> bool {
+    // Decode before opening: keep the clipboard open as short as possible.
+    let extra = if has_dib(p) { None } else { p.iter().find(|f| is_png(f)).and_then(|f| crate::imagesave::png_to_dibv5(&f.data)) };
     if !open(hwnd) {
         return false;
     }
@@ -209,22 +260,33 @@ pub fn restore(hwnd: HWND, p: &Payload) -> bool {
                 }
                 continue;
             }
-            let h = GlobalAlloc(GMEM_MOVEABLE, f.data.len().max(1));
-            if h.is_null() {
-                continue;
-            }
-            let dst = GlobalLock(h) as *mut u8;
-            if dst.is_null() {
-                GlobalFree(h);
-                continue;
-            }
-            std::ptr::copy_nonoverlapping(f.data.as_ptr(), dst, f.data.len());
-            GlobalUnlock(h);
-            if SetClipboardData(id, h).is_null() {
-                GlobalFree(h);
+            set_global(id, &f.data);
+            // The made DIB goes right after the PNG, so apps keep preferring the PNG.
+            if is_png(f) {
+                if let Some(d) = &extra {
+                    set_global(CF_DIBV5, d);
+                }
             }
         }
         CloseClipboard();
     }
     true
+}
+
+/// SetClipboardData with a copy of `data` in global memory. The clipboard must be open.
+unsafe fn set_global(id: u32, data: &[u8]) {
+    let h = GlobalAlloc(GMEM_MOVEABLE, data.len().max(1));
+    if h.is_null() {
+        return;
+    }
+    let dst = GlobalLock(h) as *mut u8;
+    if dst.is_null() {
+        GlobalFree(h);
+        return;
+    }
+    std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+    GlobalUnlock(h);
+    if SetClipboardData(id, h).is_null() {
+        GlobalFree(h);
+    }
 }

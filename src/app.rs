@@ -36,6 +36,12 @@ const TIMER_WATCH: usize = 2;
 /// After a quick Win tap: wait this long for the Start menu to open (ShowWithStart mode).
 const TIMER_TAP: usize = 3;
 const TAP_WAIT_MS: u32 = 600;
+/// Read the clipboard only after it had no change for this long. Some owners (Snipping
+/// Tool) open the clipboard again right after a copy and crash if we hold it then.
+const CAPTURE_WAIT_MS: u32 = 300;
+/// After a PNG-only capture: check again this late if the clipboard lost its bitmap.
+const TIMER_REPAIR: usize = 4;
+const REPAIR_WAIT_MS: u32 = 2000;
 /// Processes that own the open Start menu: StartMenuExperienceHost on Windows 10 and
 /// older Windows 11, SearchHost on newer Windows 11 (it also hosts the Search panel).
 const START_MENU_EXES: [&str; 2] = ["StartMenuExperienceHost.exe", "SearchHost.exe"];
@@ -65,6 +71,8 @@ pub struct App {
     fmts: clip::Formats,
     visible: bool,
     ignore_seq: u32,
+    /// Clipboard sequence number after the last PNG-only capture (see repair()).
+    capture_seq: u32,
     store: Store,
     dir: PathBuf,
     thumb_w: i32,
@@ -141,6 +149,7 @@ pub fn run(cfg: Config) {
             fmts: clip::Formats::register(),
             visible: false,
             ignore_seq: 0,
+            capture_seq: 0,
             store: Store::start(dir.clone(), hwnd as isize, WM_APP_SAVED),
             dir,
             thumb_w,
@@ -199,8 +208,34 @@ impl App {
             return; // our own restore
         }
         if let Some((p, src)) = clip::capture(self.hwnd, &self.fmts, self.cfg.max_item_bytes) {
+            let png_only = p.iter().any(clip::is_png) && !clip::has_dib(&p);
             self.add(p, src, startup);
+            if png_only {
+                self.capture_seq = unsafe { GetClipboardSequenceNumber() };
+                // The owner may still crash after the capture: check again a bit later.
+                if !self.repair() {
+                    unsafe { SetTimer(self.hwnd, TIMER_REPAIR, REPAIR_WAIT_MS, None) };
+                }
+            }
         }
+    }
+
+    /// If the clipboard lost its bitmap (see clip::dib_missing), put the current item
+    /// back, with a DIB made from its PNG. Returns true if it did (false: not needed or failed).
+    fn repair(&mut self) -> bool {
+        if unsafe { GetClipboardSequenceNumber() } != self.capture_seq || self.cur >= self.items.len() {
+            return false; // the clipboard changed since the capture
+        }
+        let Some(p) = self.payload(self.cur) else { return false };
+        if !clip::dib_missing(&p) {
+            return false;
+        }
+        crate::util::debug(|| "clipboard bitmap lost: repair from PNG".to_string());
+        if !clip::restore(self.hwnd, &p) {
+            return false;
+        }
+        self.ignore_seq = unsafe { GetClipboardSequenceNumber() };
+        true
     }
 
     fn add(&mut self, p: Payload, source: String, startup: bool) {
@@ -653,8 +688,9 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             0
         }
         WM_CLIPBOARDUPDATE => {
-            // Short delay so bursts of updates are read once.
-            SetTimer(h, TIMER_CAPTURE, 80, None);
+            // Delay (restarted by each update) so bursts of updates are read once.
+            SetTimer(h, TIMER_CAPTURE, CAPTURE_WAIT_MS, None);
+            KillTimer(h, TIMER_REPAIR);
             0
         }
         WM_TIMER => {
@@ -664,6 +700,10 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                     if with_app(|a| a.on_clipboard(false)).is_none() {
                         SetTimer(h, TIMER_CAPTURE, 80, None);
                     }
+                }
+                TIMER_REPAIR => {
+                    KillTimer(h, TIMER_REPAIR);
+                    with_app(|a| a.repair());
                 }
                 TIMER_WATCH => {
                     with_app(|a| a.watch());

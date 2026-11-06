@@ -119,6 +119,55 @@ pub fn dib_to_rgba(d: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     Some((w as u32, h as u32, out))
 }
 
+/// Decode a PNG to RGBA (any bit depth / color type).
+pub fn png_to_rgba(b: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    // The default 64 MB limit is too small for big screenshots.
+    let mut dec = png::Decoder::new_with_limits(b, png::Limits { bytes: usize::MAX });
+    dec.set_transformations(png::Transformations::normalize_to_color8());
+    let mut r = dec.read_info().ok()?;
+    let mut buf = vec![0u8; r.output_buffer_size()];
+    let info = r.next_frame(&mut buf).ok()?;
+    let (w, h) = (info.width, info.height);
+    let n = w as usize * h as usize;
+    let rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => {
+            buf.truncate(n * 4);
+            buf
+        }
+        png::ColorType::Rgb => buf[..n * 3].chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => buf[..n * 2].chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Grayscale => buf[..n].iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::Indexed => return None, // expanded by normalize_to_color8
+    };
+    Some((w, h, rgba))
+}
+
+/// Packed CF_DIBV5 (32-bit BGRA, bottom-up, sRGB) made from a PNG.
+pub fn png_to_dibv5(b: &[u8]) -> Option<Vec<u8>> {
+    let (w, h, rgba) = png_to_rgba(b)?;
+    let size = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+    let mut d = vec![0u8; 124];
+    let mut put = |o: usize, v: u32| d[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    put(0, 124); // bV5Size
+    put(4, w);
+    put(8, h); // positive: bottom-up
+    put(12, 1 | (32 << 16)); // planes 1, 32 bits
+    put(16, 3); // BI_BITFIELDS
+    put(20, u32::try_from(size).ok()?);
+    put(40, 0x00FF_0000); // red mask
+    put(44, 0x0000_FF00);
+    put(48, 0x0000_00FF);
+    put(52, 0xFF00_0000); // alpha mask
+    put(56, 0x7352_4742); // LCS_sRGB
+    put(108, 4); // LCS_GM_IMAGES
+    d.reserve(size);
+    let row = w as usize * 4;
+    for y in (0..h as usize).rev() {
+        d.extend(rgba[y * row..(y + 1) * row].chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], p[3]]));
+    }
+    Some(d)
+}
+
 /// Encode RGBA as PNG (RGB if fully opaque, which makes smaller files).
 pub fn encode_png(w: u32, h: u32, rgba: &[u8], out: impl Write) -> io::Result<()> {
     let opaque = rgba.chunks_exact(4).all(|p| p[3] == 255);
@@ -298,6 +347,29 @@ mod tests {
         let mut out = Vec::new();
         encode_png(1, 1, &[1, 2, 3, 255], &mut out).unwrap();
         assert_eq!(png::Decoder::new(&out[..]).read_info().unwrap().info().color_type, png::ColorType::Rgb);
+    }
+
+    #[test]
+    fn png_to_dibv5_roundtrip() {
+        // 2×2 RGBA, top row red + half-transparent green, bottom row blue + white.
+        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 255, 255, 255, 255, 255];
+        let mut png = Vec::new();
+        encode_png(2, 2, &rgba, &mut png).unwrap();
+        let d = png_to_dibv5(&png).unwrap();
+        let info = dib_info(&d).unwrap();
+        assert_eq!((info.width, info.height, info.bpp, info.compression, info.bits_offset), (2, 2, 32, 3, 124));
+        assert!(info.complete);
+        assert_eq!(dib_to_rgba(&d).unwrap(), (2, 2, rgba));
+        // RGB and grayscale PNGs become opaque RGBA
+        let mut png = Vec::new();
+        encode_png(1, 1, &[1, 2, 3, 255], &mut png).unwrap();
+        assert_eq!(png_to_rgba(&png).unwrap(), (1, 1, vec![1, 2, 3, 255]));
+        let mut g = Vec::new();
+        let mut enc = png::Encoder::new(&mut g, 1, 1);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.write_header().unwrap().write_image_data(&[7]).unwrap();
+        assert_eq!(png_to_rgba(&g).unwrap(), (1, 1, vec![7, 7, 7, 255]));
+        assert!(png_to_dibv5(b"not a png").is_none());
     }
 
     #[test]
