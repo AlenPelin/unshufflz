@@ -65,6 +65,15 @@ pub fn keep_visible(sel: usize, scroll: usize, rows: usize) -> usize {
     }
 }
 
+/// Where a new item with `key` goes in a list with `keys`, when item `cur` is on the
+/// clipboard: at `cur`, after the duplicates of `key` (which are removed) are taken out.
+pub fn insert_pos(keys: &[u64], cur: usize, key: u64) -> usize {
+    let cur = cur.min(keys.len());
+    let removed_before = keys[..cur].iter().filter(|&&k| k == key).count();
+    let left = keys.iter().filter(|&&k| k != key).count();
+    (cur - removed_before).min(left)
+}
+
 pub fn payload_size(p: &Payload) -> u64 {
     p.iter().map(|f| f.data.len() as u64).sum()
 }
@@ -102,6 +111,18 @@ mod tests {
         assert_eq!(keep_visible(14, 5, 10), 5); // still visible, no move
         assert_eq!(keep_visible(4, 5, 10), 4); // one above the top
         assert_eq!(keep_visible(0, 7, 10), 0);
+    }
+
+    #[test]
+    fn new_item_goes_at_current_position() {
+        let k = [10, 20, 30, 40];
+        assert_eq!(insert_pos(&k, 0, 99), 0); // newest is current: on top
+        assert_eq!(insert_pos(&k, 2, 99), 2); // item 3 current: new item 3, old one moves to 4
+        assert_eq!(insert_pos(&k, 2, 10), 1); // duplicate above is removed first
+        assert_eq!(insert_pos(&k, 2, 30), 2); // replaces the current item
+        assert_eq!(insert_pos(&k, 2, 40), 2); // duplicate below: no shift
+        assert_eq!(insert_pos(&[], 0, 1), 0);
+        assert_eq!(insert_pos(&k, 9, 99), 4); // cur out of range: clamp
     }
 
     #[test]

@@ -13,6 +13,7 @@ Current version: **0.3.1**. The version lives in the root `Cargo.toml`. The inst
 - Win+S = when the current item is an image: save it as PNG to `Pictures\Clipboard`, and replace it (history and clipboard) with the saved file.
 - Win+B = delete the highlighted item. Deleting the current clipboard item puts the next older one on the clipboard.
 - Choosing an item does not reorder the list; the overlay opens on the current clipboard item. So "Ctrl+V, Win+V" repeated pastes copied items newest first (and "Ctrl+V, Win+B" does too, deleting them).
+- A new copy goes in at the position of the current clipboard item, which moves one down. After choosing item 3, the next copy becomes item 3 and the old item 3 becomes item 4.
 - At most 10 list rows are visible. Longer histories scroll with the selection, without a scrollbar.
 - A **settings window** from the tray: width, side, history size.
 - Use very little memory and CPU. No browser engine, no JS, no .NET runtime.
@@ -239,17 +240,17 @@ App { …, cur: usize, sel: usize, scroll: usize, … }
 ```
 
 - `full_hash` (→ `id`): xxh3 over every format: id as u32 LE (or the name bytes for registered formats), data length as u64 LE, data.
-- `content_key` (→ `key`): the same hash over one main format, the first found of CF_HDROP, CF_DIBV5, CF_DIB, CF_UNICODETEXT. If none exist, it equals `full_hash`.
+- `content_key` (→ `key`): the same hash over one main format, the first found of CF_HDROP, CF_DIBV5, CF_DIB, PNG, CF_UNICODETEXT. If none exist, it equals `full_hash`.
 - `cur` = index of the item that is on the clipboard now. Choosing an item in the overlay does **not** reorder the list; it only moves `cur`. So "Ctrl+V, Win+V" repeated pastes the history newest first (D, C, B, A). `cur` is not saved; at startup it is found again from the clipboard (see Add). Every list change keeps `cur` pointing at the same item (or clamps it to `len−1`). The Win+S image flag uses item `cur`.
 
 Operations:
 - **Add**:
   1. Same `id` as item `cur` → ignore.
   2. At startup only (the first capture after load): if any item has the same `id`, set `cur` to it and stop (the order is kept across restarts).
-  3. Otherwise remove every item with the same `key`.
-  4. Build the preview, send the item to the writer, insert it at position 0 with time = now.
+  3. Otherwise `pos = insert_pos(keys, cur, key)`: `cur` minus the items with the same `key` above it. Remove every item with the same `key`.
+  4. Build the preview, send the item to the writer, insert it at `pos` with time = now. The old item `cur` moves one down.
   5. **Cut the list to `max_items`**.
-  6. cur = 0, sel = 0, send the index to the writer, repaint if visible.
+  6. cur = pos, sel = pos, send the index to the writer, repaint if visible.
 - **Saved**: if size > RAM_LIMIT, drop the payload from RAM.
 - **Select / commit** of item `i` ≠ `cur`:
   1. Get the payload from RAM or from disk. If that fails: beep, remove the item (fix `cur`), save the index.

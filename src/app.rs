@@ -250,13 +250,17 @@ impl App {
                 return;
             }
         }
+        // A new copy goes in at the current item's position, which moves one down: after
+        // choosing item 3, the next copy becomes item 3 and the old item 3 becomes item 4.
         let key = history::content_key(&p);
+        let keys: Vec<u64> = self.items.iter().map(|it| it.key).collect();
+        let pos = history::insert_pos(&keys, self.cur, key);
         self.items.retain(|it| it.key != key);
         let item = self.new_item(id, key, p, source);
-        self.items.insert(0, item);
+        self.items.insert(pos, item);
         self.items.truncate(self.cfg.max_items);
-        self.cur = 0;
-        self.sel = 0;
+        self.cur = pos.min(self.items.len() - 1);
+        self.sel = self.cur;
         self.save_index();
         self.invalidate();
     }

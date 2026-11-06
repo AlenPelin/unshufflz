@@ -76,7 +76,7 @@ Tray icon menu (right click):
 - **Start with Windows**: on/off.
 - **Exit**.
 
-Tip: to paste a stack of copied items newest first, press Ctrl+V, then Win+V, and repeat. Each Win+V takes the next older item, because choosing an item does not move it in the list. Copying something new puts it at the top and starts over from there. Ctrl+V then Win+B works too, but it also deletes each pasted item.
+Tip: to paste a stack of copied items newest first, press Ctrl+V, then Win+V, and repeat. Each Win+V takes the next older item, because choosing an item does not move it in the list. Copying something new puts it at the place of the current item, which moves one down (after choosing item 3, the new copy becomes item 3 and the old item 3 becomes item 4). Ctrl+V then Win+B works too, but it also deletes each pasted item.
 
 Starting `unshufflz.exe` again (e.g. from the Start menu) while it is running opens the settings window.
 
