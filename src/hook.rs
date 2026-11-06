@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
@@ -195,6 +195,31 @@ pub fn step(s: &mut St, vk: u32, down: bool) -> Out {
     o
 }
 
+/// One wheel notch.
+pub const NOTCH: i32 = 120;
+
+/// Mouse wheel over the visible overlay → actions: down = older (PREV), up = newer (NEXT),
+/// one per notch. Smaller deltas (smooth wheels) add up in `acc`.
+pub fn wheel(s: &mut St, acc: &mut i32, delta: i32) -> Vec<usize> {
+    if s.phase == Phase::Shown {
+        s.acted = true; // releasing Win then commits, it is not a tap
+    }
+    if (*acc > 0) != (delta > 0) {
+        *acc = 0; // direction changed
+    }
+    *acc += delta;
+    let mut posts = Vec::new();
+    while *acc >= NOTCH {
+        *acc -= NOTCH;
+        posts.push(A_NEXT);
+    }
+    while *acc <= -NOTCH {
+        *acc += NOTCH;
+        posts.push(A_PREV);
+    }
+    posts
+}
+
 /// Hold delay elapsed.
 pub fn on_hold(s: &mut St) -> Option<usize> {
     if s.phase == Phase::Armed {
@@ -212,10 +237,26 @@ pub fn set_image_on_clipboard(on: bool) {
     IMAGE.store(on, Ordering::Relaxed);
 }
 static HOLD_MS: AtomicU32 = AtomicU32::new(250);
+/// Screen rect of the visible overlay (left, top, right, bottom); right == left when hidden.
+static OVERLAY: [AtomicI32; 4] = [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)];
+
+/// Called by the main thread when the overlay is shown (x, y, width, height) or hidden.
+pub fn set_overlay_rect(r: Option<(i32, i32, i32, i32)>) {
+    let (x, y, w, h) = r.unwrap_or_default();
+    for (a, v) in OVERLAY.iter().zip([x, y, x + w, y + h]) {
+        a.store(v, Ordering::Relaxed);
+    }
+}
+
+fn over_overlay(pt: POINT) -> bool {
+    let [l, t, r, b] = [0, 1, 2, 3].map(|i| OVERLAY[i].load(Ordering::Relaxed));
+    pt.x >= l && pt.x < r && pt.y >= t && pt.y < b
+}
 
 thread_local! {
     static ST: RefCell<St> = const { RefCell::new(St::new()) };
     static TIMER: RefCell<usize> = const { RefCell::new(0) };
+    static WHEEL: RefCell<i32> = const { RefCell::new(0) };
 }
 
 /// Change the hold delay (settings window).
@@ -229,14 +270,34 @@ pub fn start(main: HWND, hold_ms: u32) {
     HOLD_MS.store(hold_ms, Ordering::Relaxed);
     std::thread::spawn(|| unsafe {
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), GetModuleHandleW(std::ptr::null()), 0);
+        let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), GetModuleHandleW(std::ptr::null()), 0);
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
             if msg.message == WM_TIMER && msg.hwnd.is_null() {
                 timer_fired(msg.wParam);
             }
         }
+        UnhookWindowsHookEx(mouse);
         UnhookWindowsHookEx(hook);
     });
+}
+
+/// Wheel over the visible overlay walks the history; the wheel event is swallowed then.
+/// Everything else passes at once (this runs for every mouse move system-wide).
+unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 && wp as u32 == WM_MOUSEWHEEL {
+        let m = &*(lp as *const MSLLHOOKSTRUCT);
+        if over_overlay(m.pt) {
+            let delta = (m.mouseData >> 16) as u16 as i16 as i32;
+            let posts = ST.with(|s| WHEEL.with(|acc| wheel(&mut s.borrow_mut(), &mut acc.borrow_mut(), delta)));
+            crate::util::debug(|| format!("hook wheel delta={} {:?}", delta, posts));
+            for a in posts {
+                post(a);
+            }
+            return 1;
+        }
+    }
+    CallNextHookEx(null_mut(), code, wp, lp)
 }
 
 fn post(a: usize) {
@@ -356,6 +417,33 @@ mod tests {
         step(&mut s, VK_LWIN_, false);
         step(&mut s, 0xA0, false);
         assert_eq!(s.mods, 0);
+    }
+
+    #[test]
+    fn wheel_walks_history() {
+        let mut s = st();
+        let mut acc = 0;
+        assert_eq!(wheel(&mut s, &mut acc, -120), vec![A_PREV]); // down = older
+        assert_eq!(wheel(&mut s, &mut acc, 240), vec![A_NEXT, A_NEXT]); // up = newer
+        // smooth wheel: small deltas add up
+        assert!(wheel(&mut s, &mut acc, 60).is_empty());
+        assert_eq!(wheel(&mut s, &mut acc, 60), vec![A_NEXT]);
+        // a direction change drops the partial delta
+        assert!(wheel(&mut s, &mut acc, 100).is_empty());
+        assert!(wheel(&mut s, &mut acc, -100).is_empty());
+        assert_eq!(acc, -100);
+    }
+
+    #[test]
+    fn wheel_then_quick_release_commits() {
+        // A wheel step counts as an action, so a quick Win release commits (no Start tap).
+        let mut s = st();
+        s.now = 1000;
+        step(&mut s, VK_LWIN_, true);
+        on_hold(&mut s);
+        wheel(&mut s, &mut 0, -120);
+        s.now = 1100;
+        assert_eq!(step(&mut s, VK_LWIN_, false).posts, vec![A_COMMIT]);
     }
 
     #[test]

@@ -1,6 +1,5 @@
 use crate::app::App;
 use crate::config::Side;
-use crate::history::keep_visible;
 use crate::preview::{Kind, Preview, Thumb};
 use crate::util::{format_time, w, wide};
 use std::ptr::null_mut;
@@ -16,8 +15,6 @@ const ACCENT: u32 = 0x00D7_7800;
 const SEL: u32 = 0x0070_4010;
 const LINE: u32 = 0x0040_4040;
 
-/// History rows visible at once; longer histories scroll (no scrollbar).
-pub const LIST_ROWS: usize = 10;
 /// Overlay opacity (0-255).
 pub const OPACITY: u32 = 245;
 
@@ -167,24 +164,33 @@ unsafe fn draw(app: &mut App, dc: HDC, wd: i32, ht: i32) {
             fill(dc, rect(x0, y, x1, y + 1), LINE);
             y += s(12);
 
+            // Preview in the top third, list in the bottom two thirds. The selected row
+            // stays at 2/3 of the height; the list moves around it.
             let row = s(24);
-            let rows = n.min(LIST_ROWS);
-            let first = keep_visible(sel, app.scroll, LIST_ROWS).min(n - rows);
-            let list_top = ht - pad - row * rows as i32;
+            let list_top = ht / 3;
+            let list_bottom = ht - pad;
             let pr = rect(x0, y, x1, list_top - s(16));
             let rows_hit = preview(dc, f, &it.preview, pr, &s);
             if it.preview.kind == Kind::Files {
                 drag = (pr, rows_hit);
             }
             fill(dc, rect(x0, list_top - s(8), x1, list_top - s(8) + 1), LINE);
-            for (i, item) in app.items.iter().enumerate().skip(first).take(rows) {
-                let top = list_top + row * (i - first) as i32;
+            let sel_top = ht * 2 / 3 - row / 2;
+            let clip = CreateRectRgn(0, list_top, wd, list_bottom);
+            SelectClipRgn(dc, clip);
+            for (i, item) in app.items.iter().enumerate() {
+                let top = sel_top + row * (i as i32 - sel as i32);
+                if top + row <= list_top || top >= list_bottom {
+                    continue;
+                }
                 if i == sel {
                     fill(dc, rect(x0 - s(6), top, x1 + s(6), top + row), SEL);
                 }
                 text(dc, f.small, &w(&(i + 1).to_string()), rect(x0, top, x0 + s(20), top + row), LINE1 | DT_LEFT, FG2);
                 text(dc, f.body, &item.preview.line, rect(x0 + s(22), top, x1, top + row), LINE1 | DT_LEFT, if i == sel { FG } else { FG2 });
             }
+            SelectClipRgn(dc, null_mut());
+            DeleteObject(clip);
         }
         (app.drag_area, app.drag_rows) = drag;
     }

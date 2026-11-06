@@ -54,8 +54,6 @@ pub struct App {
     /// Index of the item that is on the clipboard now (the overlay opens on it).
     cur: usize,
     pub sel: usize,
-    /// First history row shown in the list (it shows at most `paint::LIST_ROWS` rows).
-    pub scroll: usize,
     /// Horizontal content offset during the slide-in (0 when settled).
     pub slide: i32,
     /// Window rect (x, y, width, height) of the overlay on the current monitor.
@@ -139,7 +137,6 @@ pub fn run(cfg: Config) {
             items: Vec::new(),
             cur: 0,
             sel: 0,
-            scroll: 0,
             slide: 0,
             frame: (0, 0, 0, 0),
             dpi: 96,
@@ -306,13 +303,11 @@ impl App {
                 if self.sel + 1 < self.items.len() {
                     self.sel += 1;
                 }
-                self.scroll = history::keep_visible(self.sel, self.scroll, paint::LIST_ROWS);
                 self.invalidate();
             }
             A_NEXT => {
                 self.show();
                 self.sel = self.sel.saturating_sub(1);
-                self.scroll = history::keep_visible(self.sel, self.scroll, paint::LIST_ROWS);
                 self.invalidate();
             }
             A_COMMIT => {
@@ -339,13 +334,11 @@ impl App {
                 self.show();
                 self.save_image();
                 self.sel = self.cur;
-                self.scroll = history::keep_visible(self.sel, self.scroll, paint::LIST_ROWS);
                 self.invalidate();
             }
             A_DELETE => {
                 self.show();
                 self.delete(self.sel);
-                self.scroll = history::keep_visible(self.sel, self.scroll, paint::LIST_ROWS);
                 self.invalidate();
             }
             _ => {}
@@ -449,7 +442,6 @@ impl App {
             return;
         }
         self.sel = self.cur.min(self.items.len().saturating_sub(1));
-        self.scroll = history::keep_visible(self.sel, 0, paint::LIST_ROWS);
         unsafe {
             let mut pt = std::mem::zeroed();
             GetCursorPos(&mut pt);
@@ -472,6 +464,7 @@ impl App {
             SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             SetTimer(self.hwnd, TIMER_WATCH, 150, None);
             self.visible = true;
+            hook::set_overlay_rect(Some((x, wa.top, w, h)));
             self.update_click_through();
             crate::util::debug(|| "main overlay shown".to_string());
             if animate {
@@ -511,6 +504,7 @@ impl App {
             ShowWindow(self.hwnd, SW_HIDE);
             KillTimer(self.hwnd, TIMER_WATCH);
         }
+        hook::set_overlay_rect(None);
         self.visible = false;
     }
 

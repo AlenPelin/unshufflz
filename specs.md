@@ -14,7 +14,8 @@ Current version: **0.3.1**. The version lives in the root `Cargo.toml`. The inst
 - Win+B = delete the highlighted item. Deleting the current clipboard item puts the next older one on the clipboard.
 - Choosing an item does not reorder the list; the overlay opens on the current clipboard item. So "Ctrl+V, Win+V" repeated pastes copied items newest first (and "Ctrl+V, Win+B" does too, deleting them).
 - A new copy goes in at the position of the current clipboard item, which moves one down. After choosing item 3, the next copy becomes item 3 and the old item 3 becomes item 4.
-- At most 10 list rows are visible. Longer histories scroll with the selection, without a scrollbar.
+- The preview takes the top third of the overlay, the list the bottom two thirds. The selected row stays at 2/3 of the height; the list moves around it (no scrollbar).
+- The mouse wheel over the visible overlay also walks the history: down = older (like Win+V), up = newer (like Win+C).
 - A **settings window** from the tray: width, side, history size.
 - Use very little memory and CPU. No browser engine, no JS, no .NET runtime.
 - Save history to disk **asynchronously** and **crash-safe**. Items that drop out of history are removed from disk too.
@@ -57,12 +58,12 @@ Installer features:
 | `build.ps1` | Test + build everything, copy installer to `dist\UnshufflzSetup-<version>.exe` |
 | `src/main.rs` | Entry: single instance (a second launch opens settings), DPI, start the app |
 | `src/app.rs` | `App` state, overlay window, window procedure, message loop, history operations, applying settings |
-| `src/hook.rs` | Keyboard hook thread; pure state machine `step()` / `on_hold()` |
+| `src/hook.rs` | Keyboard + mouse hook thread; pure state machine `step()` / `on_hold()` / `wheel()` |
 | `src/clip.rs` | Clipboard capture / restore, `Fmt` / `Payload`, format constants |
-| `src/history.rs` | `Item`, `full_hash`, `content_key`, `keep_visible`, `payload_size`, `RAM_LIMIT` |
+| `src/history.rs` | `Item`, `full_hash`, `content_key`, `insert_pos`, `payload_size`, `RAM_LIMIT` |
 | `src/imagesave.rs` | Win+S: DIB parsing / conversion to RGBA, PNG encoding, file naming, Pictures folder, "copied file" payload |
 | `src/preview.rs` | `Preview` / `Kind` / `Thumb`; preview building; DROPFILES parsing; DIB thumbnails |
-| `src/paint.rs` | `Fonts`, `LIST_ROWS`, `OPACITY`; `render` (draw + `UpdateLayeredWindow`), `compose` (slide shift + alpha) |
+| `src/paint.rs` | `Fonts`, `OPACITY`; `render` (draw + `UpdateLayeredWindow`), `compose` (slide shift + alpha) |
 | `src/drag.rs` | `init` (OleInitialize), `drag_files`: shell drag of file paths out of the overlay (section 10a) |
 | `src/anim.rs` | Slide-in curve: `cubic_bezier`, `SLIDE`, `slide_offset` |
 | `src/settings.rs` | Settings window |
@@ -108,7 +109,7 @@ Shutdown:
 | Thread | Does |
 |---|---|
 | Main | Overlay window, settings window, clipboard listener, timers, tray, **all** history state |
-| Hook | `WH_KEYBOARD_LL` hook + message loop + hold timer; owns the key state machine |
+| Hook | `WH_KEYBOARD_LL` + `WH_MOUSE_LL` hooks + message loop + hold timer; owns the key state machine |
 | Writer | Writes item files and the index, deletes unused files |
 
 | Message | Value | From → to | wParam / lParam |
@@ -146,7 +147,8 @@ App state lives in a thread-local `RefCell<Option<App>>`. Handlers use `try_borr
 
 ### 6.2 Hook thread
 
-- `SetWindowsHookExW(WH_KEYBOARD_LL, proc, GetModuleHandleW(NULL), 0)`, then a `GetMessageW` loop.
+- `SetWindowsHookExW(WH_KEYBOARD_LL, proc, GetModuleHandleW(NULL), 0)` and `SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, …)`, then a `GetMessageW` loop.
+- **Mouse wheel**: `show()` / `hide()` publish the overlay screen rect (`set_overlay_rect`, atomics; empty when hidden). `mouse_proc` passes every event at once, except `WM_MOUSEWHEEL` with the cursor inside that rect: `wheel(st, acc, delta)` turns it into actions (one per 120 of delta, down = PREV, up = NEXT; partial deltas add up in `acc`, which resets when the direction changes; sets `acted` when Shown, so a quick Win release commits), posts them, and swallows the event.
 - The hold timer is a thread timer (`SetTimer(NULL, 0, HoldDelayMs, NULL)`), handled as `WM_TIMER` with hwnd NULL. Only one is active at a time.
 - If `HoldDelayMs` is 0, no timer is used: when `step()` asks to start the timer, the callback runs `on_hold()` at once and posts SHOW. The overlay is visible about 7 ms after Win down (measured).
 - `HoldDelayMs` lives in a global atomic; `hook::set_hold_ms` changes it (settings window).
@@ -236,7 +238,7 @@ Payload = Vec<Fmt>
 Item { id: u64, key: u64, time: u64 (unix s), source: String, size: u64,
        payload: Option<Arc<Payload>>, preview: Preview }
 RAM_LIMIT = 1 MiB; capacity = Config.max_items (1..100)
-App { …, cur: usize, sel: usize, scroll: usize, … }
+App { …, cur: usize, sel: usize, … }
 ```
 
 - `full_hash` (→ `id`): xxh3 over every format: id as u32 LE (or the name bytes for registered formats), data length as u64 LE, data.
@@ -278,13 +280,13 @@ Operations:
   3. Save the INI.
   4. If the width changed: recompute the thumbnail width and rebuild the previews of image items, from the payload in RAM or read from disk.
 
-Selection and scrolling:
-- **SHOW**: if hidden, sel = cur and scroll = `keep_visible(cur, 0, LIST_ROWS)`.
-- **PREV**: sel+1, limited to len−1. **NEXT**: sel−1, limited to 0. After either: `scroll = keep_visible(sel, scroll, LIST_ROWS)`.
+Selection:
+- **SHOW**: if hidden, sel = cur.
+- **PREV**: sel+1, limited to len−1. **NEXT**: sel−1, limited to 0.
 - **COMMIT**: hide; if `sel ≠ cur` and `sel < len`, select the item. **CANCEL**: hide.
 - **TAP**: like CANCEL, except in ShowWithStart mode (below).
-- **DELETE**: show if hidden, `delete(sel)`, then `keep_visible`, repaint.
-- **SAVE**: show if hidden, `save_image()`, sel = cur, `keep_visible`, repaint.
+- **DELETE**: show if hidden, `delete(sel)`, repaint.
+- **SAVE**: show if hidden, `save_image()`, sel = cur, repaint.
 - **ShowWithStart mode** (`Config.show_with_start`): the overlay is also shown while the Start menu is open.
   - `is_start_menu(hwnd)`: the window's process (`util::window_exe_name`) is `StartMenuExperienceHost.exe` (Windows 10 / older 11) or `SearchHost.exe` (newer Windows 11, where Start and Search share a process; checked on 26200: the open Start menu's foreground window belongs to SearchHost). Case-insensitive.
   - `on_foreground(hwnd)`:
@@ -296,10 +298,6 @@ Selection and scrolling:
   - TAP in any other case → hide.
   - The watch timer (2) does not hide the overlay while `start_open || tap_pending`.
   - COMMIT and CANCEL hide the overlay as usual, also while Start stays open (Start was masked, so it stays open).
-- `keep_visible(sel, scroll, rows)` moves the window as little as possible:
-  - `sel < scroll` → `sel`;
-  - `sel ≥ scroll+rows` → `sel+1−rows`;
-  - otherwise → `scroll`.
 
 ## 9. Storage (`store.rs`)
 
@@ -425,11 +423,10 @@ Layout (`pad = s(14)`):
 3. `y += s(18)`: `"<time> · <source>"`. Time is `HH:MM:SS` for today, otherwise `DD.MM.YYYY HH:MM`.
 4. `y += s(26)`: separator; `y += s(12)`.
 5. List:
-   - `LIST_ROWS = 10`; `rows = min(n, 10)`; `row = s(24)`.
-   - `first = min(keep_visible(sel, scroll, 10), n − rows)`.
-   - `list_top = height − pad − row·rows`; separator at `list_top − s(8)`.
+   - `row = s(24)`; `list_top = height / 3`; `list_bottom = height − pad`; separator at `list_top − s(8)`.
+   - The selected row is at `sel_top = height·2/3 − row/2`; row `i` is at `sel_top + row·(i − sel)`.
 6. Preview area: from `y` to `list_top − s(16)`.
-7. List rows: items `first .. first+rows`. Each row shows the item number (`i+1`; small, secondary, width s(20)) and its summary line at `x0+s(22)`. The selected row has a background from `x0−s(6)` to `x1+s(6)` and main-color text. There is no scrollbar.
+7. List rows: every item whose row overlaps `list_top .. list_bottom`, clipped to that band (`SelectClipRgn`). Each row shows the item number (`i+1`; small, secondary, width s(20)) and its summary line at `x0+s(22)`. The selected row has a background from `x0−s(6)` to `x1+s(6)` and main-color text. There is no scrollbar.
 
 Preview area by kind:
 - **Text / Rich / Other**: `DrawTextW` with word break, tab expansion, edit-control wrapping.
@@ -704,7 +701,7 @@ Errors show "Setup failed: …" (unless silent) and set exit code 1. User data i
 | hook | missed Win up: a Win down 10 s later is a new press, while real auto-repeat (every 33 ms for 2.5 s) is still ignored; quick tap; quick tap with the overlay already shown → TAP and Win up passes (Start opens), also across tick-counter wrap; a quick V is not a tap; hold → SHOW, release → COMMIT + inject; V/C navigation and swallowing; B → SHOW + DELETE, swallowed, Start menu masked; S taken only with an image and no modifiers (Win+S Search and Win+Shift+S pass); Win+E passthrough; other key while shown → CANCEL; modifiers; Esc cancel + mask; Esc before overlay; C/V without Win |
 | store | item round trip; bit flip / truncation / empty rejected; index round trip + cleanup; broken index → scan; writer thread + double shutdown; **1000 items with a limit of 10 → exactly 10 item files + index on disk, newest 10 loaded in order** |
 | preview | DROPFILES parsing; text / RTF / files / image previews; thumbnail scaling; small image not enlarged; bad DIBs rejected |
-| history | duplicate key with extra formats; registered formats hashed by name; different text; `keep_visible` scrolling |
+| history | duplicate key with extra formats; registered formats hashed by name; different text; `insert_pos` |
 | config | defaults and overrides incl. Position and MaxItems; clamping; format → parse round trip incl. PicturesDir, ShowWithStart and AnimationMs; AnimationMs default 50, 0 allowed, capped at 1000 |
 | anim | curve: ends at 0 and 1, monotonic, ease-out (> 0.5 at t = 0.25), linear curve stays linear; offsets: full width at start, 0 at and after the end, 0 when the duration is 0, mid-values in range |
 | paint | `compose`: settled frame gets uniform premultiplied alpha (255 and 128); shift right / left with a transparent gap; fully shifted out = all transparent |
